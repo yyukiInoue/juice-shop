@@ -13,7 +13,6 @@ CVSS_THRESHOLD = 7.0
 EPSS_THRESHOLD = 0.01
 
 # --- GraphQL Query (SCA / Dependabot 用) ---
-# ※SCAはGraphQLの方が情報が取りやすいのでそのまま維持
 QUERY_SCA = """
 query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
@@ -59,10 +58,10 @@ def run():
     }
     
     # ==========================================
-    # 1. SCA (Dependabot) - GraphQL使用
+    # 1. SCA (Dependabot) - GraphQL
     # ==========================================
     try:
-        print("Fetching SCA (Dependabot) alerts via GraphQL...")
+        print("Fetching SCA (Dependabot) alerts...")
         variables = {"owner": REPO_OWNER, "name": REPO_NAME}
         resp = requests.post(
             "https://api.github.com/graphql",
@@ -88,7 +87,6 @@ def run():
                 cve_id = next((i["value"] for i in identifiers if i["type"] == "CVE"), "")
                 epss = get_epss_score(cve_id) if cve_id else 0
 
-                # ★判定ロジック（本番用に戻しています）
                 if (severity == "CRITICAL") or (severity == "HIGH" and epss >= EPSS_THRESHOLD):
                     msg = f"📦 *{pkg_name}* ({severity})\nCVSS: {cvss} | EPSS: {epss:.2%}\nCVE: {cve_id}"
                     notifications.append(msg)
@@ -96,18 +94,15 @@ def run():
         print(f"  [SCA Error] {e}")
 
     # ==========================================
-    # 2. SAST (Code Scanning) - REST API使用
+    # 2. SAST (Code Scanning) - REST API
     # ==========================================
-    # ★ここをREST APIに完全変更しました！これならFine-grained Tokenで通ります。
     try:
-        print("Fetching SAST (Code Scanning) alerts via REST API...")
-        
-        # REST API Endpoint
+        print("Fetching SAST (Code Scanning) alerts...")
         url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/code-scanning/alerts"
         params = {
             "state": "open",
             "per_page": 50,
-            "severity": "critical,high" # 最初からCriticalとHighだけもらう
+            "severity": "critical,high"
         }
         
         resp = requests.get(url, headers=headers, params=params)
@@ -125,28 +120,58 @@ def run():
                 msg_text = instance.get("message", {}).get("text", "No message")
                 path = instance.get("location", {}).get("path", "unknown")
 
-                # REST APIでは serverity フィルタ済みだが念のため確認
                 if severity in ["CRITICAL", "HIGH"]:
                     msg = f"🛡️ *{tool}* ({severity})\nFile: `{path}`\nMsg: {msg_text}"
                     notifications.append(msg)
-        else:
-            print(f"  [SAST Error] REST API Status {resp.status_code}: {resp.text}")
-
     except Exception as e:
         print(f"  [SAST Error] {e}")
 
     # ==========================================
-    # 3. Slack通知
+    # 3. Secret Scanning - REST API (★新規追加)
+    # ==========================================
+    try:
+        print("Fetching Secret Scanning alerts...")
+        url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/secret-scanning/alerts"
+        params = {
+            "state": "open",
+            "per_page": 50
+        }
+        
+        resp = requests.get(url, headers=headers, params=params)
+        
+        if resp.status_code == 200:
+            alerts = resp.json()
+            print(f"  Found {len(alerts)} Secret entries.")
+            
+            for alert in alerts:
+                # シークレットの種類（例: "AWS Access Key"）
+                secret_type = alert.get("secret_type_display_name") or alert.get("secret_type")
+                html_url = alert.get("html_url")
+                
+                # シークレット漏洩は問答無用でCRITICAL扱いとして通知
+                msg = f"🔑 *Secret Detected* (CRITICAL)\nType: `{secret_type}`\nLink: {html_url}"
+                notifications.append(msg)
+        elif resp.status_code == 404:
+            # 機能が無効化されている場合など
+            print("  [Secret Info] Feature disabled or not accessible.")
+        else:
+            print(f"  [Secret Error] Status {resp.status_code}: {resp.text}")
+
+    except Exception as e:
+        print(f"  [Secret Error] {e}")
+
+    # ==========================================
+    # 4. Slack通知
     # ==========================================
     if notifications:
         print(f"Sending {len(notifications)} alerts to Slack...")
         slack_payload = {
             "blocks": [
-                {"type": "header", "text": {"type": "plain_text", "text": "🚨 Security Daily Digest"}},
+                {"type": "header", "text": {"type": "plain_text", "text": "🚨 Security Daily Digest (All in One)"}},
                 {"type": "divider"}
             ]
         }
-        for note in notifications[:10]:
+        for note in notifications[:15]: # 少し枠を増やしました
             slack_payload["blocks"].append({
                 "type": "section", "text": {"type": "mrkdwn", "text": note}
             })
