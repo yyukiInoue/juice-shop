@@ -133,7 +133,7 @@ def run():
         print("Fetching Secret Scanning alerts...")
         url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/secret-scanning/alerts"
         params = {
-            "state": "open",
+            "state": "resolved",
             "per_page": 50
         }
         
