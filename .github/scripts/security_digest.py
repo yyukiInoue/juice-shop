@@ -9,10 +9,11 @@ REPO_NAME = os.getenv("GITHUB_REPOSITORY").split("/")[-1]
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 
 # フィルタリング基準
-CVSS_THRESHOLD = 7.0      # これ以上のスコアを対象
-EPSS_THRESHOLD = 0.01     # 1%以上の悪用確率なら対象 (0.01)
+CVSS_THRESHOLD = 7.0
+EPSS_THRESHOLD = 0.01
 
-# --- GraphQL Query 1: SCA (Dependabot) 専用 ---
+# --- GraphQL Query (SCA / Dependabot 用) ---
+# ※SCAはGraphQLの方が情報が取りやすいのでそのまま維持
 QUERY_SCA = """
 query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
@@ -28,28 +29,6 @@ query($owner: String!, $name: String!) {
             identifiers { type value }
           }
         }
-      }
-    }
-  }
-}
-"""
-
-# --- GraphQL Query 2: SAST (Code Scanning) 専用 ---
-QUERY_SAST = """
-query($owner: String!, $name: String!) {
-  repository(owner: $owner, name: $name) {
-    codeScanningAlerts(first: 50) {
-      nodes {
-        createdAt
-        state
-        rule {
-          securitySeverityLevel
-        }
-        mostRecentInstance {
-          message { text }
-          location { path }
-        }
-        tool { name }
       }
     }
   }
@@ -78,30 +57,25 @@ def run():
         "Authorization": f"Bearer {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3+json"
     }
-    variables = {"owner": REPO_OWNER, "name": REPO_NAME}
-
+    
     # ==========================================
-    # 1. SCA (Dependabot) の取得
+    # 1. SCA (Dependabot) - GraphQL使用
     # ==========================================
     try:
-        print("Fetching SCA (Dependabot) alerts...")
+        print("Fetching SCA (Dependabot) alerts via GraphQL...")
+        variables = {"owner": REPO_OWNER, "name": REPO_NAME}
         resp = requests.post(
             "https://api.github.com/graphql",
             json={"query": QUERY_SCA, "variables": variables},
             headers=headers
         )
-        
         data = resp.json()
-        if "errors" in data:
-            print("  [SCA Warning] GitHub returned errors (skipping SCA):")
-            print(json.dumps(data["errors"], indent=2))
         
-        elif data.get("data") and data["data"].get("repository"):
+        if data.get("data") and data["data"].get("repository"):
             alerts = data["data"]["repository"].get("vulnerabilityAlerts", {}).get("nodes", [])
-            print(f"  Found {len(alerts)} SCA entries. Filtering...")
+            print(f"  Found {len(alerts)} SCA entries.")
             
             for alert in alerts:
-                # OPEN以外は無視
                 if alert.get("state") != "OPEN":
                     continue
 
@@ -109,70 +83,54 @@ def run():
                 severity = vuln["severity"]
                 pkg_name = vuln["package"]["name"]
                 
-                # CVSS & CVE
                 cvss = vuln["advisory"]["cvss"]["score"] if vuln["advisory"]["cvss"] else 0
                 identifiers = vuln["advisory"].get("identifiers", [])
                 cve_id = next((i["value"] for i in identifiers if i["type"] == "CVE"), "")
-                
-                # EPSS
                 epss = get_epss_score(cve_id) if cve_id else 0
 
-                # 判定
-                # if (severity == "CRITICAL") or (severity == "HIGH" and epss >= EPSS_THRESHOLD):
-                #     msg = f"📦 *{pkg_name}* ({severity})\nCVSS: {cvss} | EPSS: {epss:.2%}\nCVE: {cve_id}"
-                #     notifications.append(msg)
-      # 判定（テストのため全許可！）
-                msg = f"📦 [TEST] *{pkg_name}* ({severity})\nCVSS: {cvss} | EPSS: {epss:.2%}\nCVE: {cve_id}"
-                notifications.append(msg)
-                print(f"  -> Added to notification: {pkg_name} ({severity})")
-        else:
-            print("  [SCA Info] No data returned.")
-
+                # ★判定ロジック（本番用に戻しています）
+                if (severity == "CRITICAL") or (severity == "HIGH" and epss >= EPSS_THRESHOLD):
+                    msg = f"📦 *{pkg_name}* ({severity})\nCVSS: {cvss} | EPSS: {epss:.2%}\nCVE: {cve_id}"
+                    notifications.append(msg)
     except Exception as e:
         print(f"  [SCA Error] {e}")
 
     # ==========================================
-    # 2. SAST (Code Scanning) の取得
+    # 2. SAST (Code Scanning) - REST API使用
     # ==========================================
+    # ★ここをREST APIに完全変更しました！これならFine-grained Tokenで通ります。
     try:
-        print("Fetching SAST (Code Scanning) alerts...")
-        resp = requests.post(
-            "https://api.github.com/graphql",
-            json={"query": QUERY_SAST, "variables": variables},
-            headers=headers
-        )
+        print("Fetching SAST (Code Scanning) alerts via REST API...")
         
-        data = resp.json()
+        # REST API Endpoint
+        url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/code-scanning/alerts"
+        params = {
+            "state": "open",
+            "per_page": 50,
+            "severity": "critical,high" # 最初からCriticalとHighだけもらう
+        }
         
-        # ★ここを修正！エラー詳細を隠さず表示する
-        if "errors" in data:
-            print("  [SAST Warning] GitHub returned errors:")
-            print(json.dumps(data["errors"], indent=2)) # <--- エラーの正体を表示！
+        resp = requests.get(url, headers=headers, params=params)
         
-        elif data.get("data") and data["data"].get("repository"):
-            alerts = data["data"]["repository"].get("codeScanningAlerts", {}).get("nodes", [])
-            print(f"  Found {len(alerts)} SAST entries. Filtering...")
-
+        if resp.status_code == 200:
+            alerts = resp.json()
+            print(f"  Found {len(alerts)} SAST entries (Critical/High).")
+            
             for alert in alerts:
-                if alert.get("state") != "OPEN":
-                    continue
+                rule = alert.get("rule", {})
+                severity = rule.get("security_severity_level", "unknown").upper()
+                tool = alert.get("tool", {}).get("name", "Unknown")
                 
-                # ルール情報やメッセージが無い場合のエラー回避
-                if not alert.get("rule") or not alert.get("mostRecentInstance"):
-                    continue
+                instance = alert.get("most_recent_instance", {})
+                msg_text = instance.get("message", {}).get("text", "No message")
+                path = instance.get("location", {}).get("path", "unknown")
 
-                rule_sev = alert["rule"]["securitySeverityLevel"]
-                tool = alert["tool"]["name"]
-                
-                msg_obj = alert["mostRecentInstance"].get("message", {})
-                msg_text = msg_obj.get("text", "No description")
-                
-                loc_obj = alert["mostRecentInstance"].get("location", {})
-                path = loc_obj.get("path", "unknown")
-
-                if rule_sev in ["CRITICAL", "HIGH"]:
-                    msg = f"🛡️ *{tool}* ({rule_sev})\nFile: `{path}`\nMsg: {msg_text}"
+                # REST APIでは serverity フィルタ済みだが念のため確認
+                if severity in ["CRITICAL", "HIGH"]:
+                    msg = f"🛡️ *{tool}* ({severity})\nFile: `{path}`\nMsg: {msg_text}"
                     notifications.append(msg)
+        else:
+            print(f"  [SAST Error] REST API Status {resp.status_code}: {resp.text}")
 
     except Exception as e:
         print(f"  [SAST Error] {e}")
