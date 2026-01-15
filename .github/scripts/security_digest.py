@@ -1,23 +1,23 @@
 import os
 import requests
 import json
+from datetime import datetime
 
 # --- 設定 ---
-# 取得するアラートの上限数
-LIMIT = 100 
-# EPSSスコアの閾値（0.01 = 1%。これ以上なら通知対象）
-EPSS_THRESHOLD = 0.01 
-
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 REPO_OWNER = os.getenv("GITHUB_REPOSITORY_OWNER")
 REPO_NAME = os.getenv("GITHUB_REPOSITORY").split("/")[-1]
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 
-# --- GraphQL Query ---
+# フィルタリング基準
+CVSS_THRESHOLD = 7.0      # これ以上のスコアを対象
+EPSS_THRESHOLD = 0.01     # 1%以上の悪用確率なら対象 (0.01)
+
+# --- GraphQL Query (SCAとSASTを取得) ---
 QUERY = """
 query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
-    vulnerabilityAlerts(first: 100, state: OPEN) {
+    vulnerabilityAlerts(first: 50, state: OPEN) {
       nodes {
         createdAt
         securityVulnerability {
@@ -31,7 +31,7 @@ query($owner: String!, $name: String!) {
         }
       }
     }
-    codeScanningAlerts(first: 100, state: OPEN) {
+    codeScanningAlerts(first: 50, state: OPEN) {
       nodes {
         createdAt
         rule {
@@ -40,10 +40,10 @@ query($owner: String!, $name: String!) {
           description
         }
         mostRecentInstance {
-          location { path startLine }
+          message { text }
+          location { path }
         }
         tool { name }
-        htmlUrl
       }
     }
   }
@@ -51,131 +51,167 @@ query($owner: String!, $name: String!) {
 """
 
 def get_epss_score(cve_id):
-    """CVE IDからEPSS(悪用確率)を取得する"""
+    """EPSS APIを叩いて悪用確率を取得する"""
     if not cve_id or not cve_id.startswith("CVE-"):
         return 0.0
     try:
         url = f"https://api.first.org/data/v1/epss?cve={cve_id}"
-        resp = requests.get(url, timeout=10)
-        if resp.status_code == 200:
-            data = resp.json()
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
             if data.get("data"):
                 return float(data["data"][0].get("epss", 0))
     except Exception as e:
-        print(f"EPSS check failed for {cve_id}: {e}")
+        print(f"EPSS Warning: {e}")
+        pass
     return 0.0
 
 def run():
     print(f"Starting security digest for {REPO_OWNER}/{REPO_NAME}...")
-    
+
+    if not GITHUB_TOKEN:
+        print("Error: GITHUB_TOKEN is missing.")
+        return
     if not SLACK_WEBHOOK_URL:
-        print("Error: SLACK_WEBHOOK_URL is not set.")
+        print("Error: SLACK_WEBHOOK_URL is missing.")
         return
 
     headers = {
         "Authorization": f"Bearer {GITHUB_TOKEN}",
         "Accept": "application/vnd.github.v3+json"
     }
+    variables = {"owner": REPO_OWNER, "name": REPO_NAME}
     
-    # 1. GitHubからアラート取得
-    resp = requests.post(
-        "https://api.github.com/graphql",
-        json={"query": QUERY, "variables": {"owner": REPO_OWNER, "name": REPO_NAME}},
-        headers=headers
-    )
-    
+    # 1. GitHub APIからデータ取得
+    try:
+        resp = requests.post(
+            "https://api.github.com/graphql",
+            json={"query": QUERY, "variables": variables},
+            headers=headers
+        )
+    except Exception as e:
+        print(f"Connection Error: {e}")
+        return
+
     if resp.status_code != 200:
-        print(f"GitHub API Error: {resp.text}")
+        print(f"API Error (Status {resp.status_code}): {resp.text}")
         return
-
-    data = resp.json()
-    repo = data.get("data", {}).get("repository")
-    
-    if not repo:
-        print("No repository data found or permission denied.")
-        return
-
-    messages = []
-
-    # --- SCA (Dependabot) の処理 ---
-    if "vulnerabilityAlerts" in repo:
-        alerts_sca = repo["vulnerabilityAlerts"]["nodes"]
-        for alert in alerts_sca:
-            vuln = alert["securityVulnerability"]
-            severity = vuln["severity"] # CRITICAL, HIGH, MODERATE, LOW
-            
-            # CVE IDを探す
-            cve_id = next((i["value"] for i in vuln["advisory"]["identifiers"] if i["type"] == "CVE"), None)
-            
-            # EPSSスコア確認
-            epss = get_epss_score(cve_id) if cve_id else 0
-            
-            # ★フィルタリング条件★
-            # 「Critical」 または 「High かつ EPSSが1%以上」
-            is_priority = (severity == "CRITICAL") or (severity == "HIGH" and epss >= EPSS_THRESHOLD)
-            
-            if is_priority:
-                pkg = vuln["package"]["name"]
-                score_txt = f"{epss*100:.2f}%" if epss > 0 else "N/A"
-                summary = vuln['advisory']['summary']
-                msg = f"📦 *{pkg}* ({severity})\n> CVE: {cve_id} | 悪用確率(EPSS): *{score_txt}*\n> 概要: {summary}"
-                messages.append(msg)
-
-    # --- SAST (Code Scanning) の処理 ---
-    if "codeScanningAlerts" in repo:
-        alerts_sast = repo["codeScanningAlerts"]["nodes"]
-        for alert in alerts_sast:
-            # ルールによってはsecuritySeverityLevelがない場合があるのでガード
-            if not alert.get("rule") or not alert["rule"].get("securitySeverityLevel"):
-                continue
-
-            severity = alert["rule"]["securitySeverityLevel"] # CRITICAL, HIGH, etc.
-            
-            # ★フィルタリング条件★
-            # Critical と High のみ通知
-            if severity in ["CRITICAL", "HIGH"]:
-                tool = alert["tool"]["name"]
-                desc = alert["rule"]["description"]
-                path = alert["mostRecentInstance"]["location"]["path"]
-                line = alert["mostRecentInstance"]["location"]["startLine"]
-                url = alert["htmlUrl"]
-                
-                msg = f"🛡️ *{tool}* ({severity})\n> File: `{path}:{line}`\n> 内容: <{url}|{desc}>"
-                messages.append(msg)
-
-    # --- Slack通知 ---
-    if messages:
-        print(f"Found {len(messages)} priority alerts.")
-        blocks = [
-            {
-                "type": "header",
-                "text": {"type": "plain_text", "text": f"🚨 Security Digest: {REPO_NAME}"}
-            },
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": "担当者様、以下の優先アラートを確認・修正してください。"}
-            },
-            {"type": "divider"}
-        ]
         
-        # Slackは見やすさのため上位15件に制限
-        for msg in messages[:15]:
-            blocks.append({
+    data = resp.json()
+    
+    # ★【修正点】エラーの詳細な理由をログに出す処理を追加
+    if "errors" in data:
+        print("GraphQL Errors found:")
+        print(json.dumps(data["errors"], indent=2))
+        # エラーがあっても、取れているデータがあれば続行する
+
+    # ★【修正点】データが空(None)の場合にクラッシュさせないガードを追加
+    if not data.get("data") or not data["data"].get("repository"):
+        print("Error: No repository data returned. Check permissions or repository name.")
+        return
+
+    repo_data = data["data"]["repository"]
+    notifications = []
+
+    # 2. SCA (Dependabot) のフィルタリング
+    # ★【修正点】Dependabotが無効だとここがNoneになる可能性があるのでチェック
+    if repo_data.get("vulnerabilityAlerts") and repo_data["vulnerabilityAlerts"].get("nodes"):
+        for alert in repo_data["vulnerabilityAlerts"]["nodes"]:
+            try:
+                vuln = alert["securityVulnerability"]
+                pkg_name = vuln["package"]["name"]
+                severity = vuln["severity"]
+                
+                # CVSS取得 (無い場合は0)
+                cvss_data = vuln["advisory"].get("cvss")
+                cvss = cvss_data["score"] if cvss_data else 0
+                
+                # CVE IDを取得
+                identifiers = vuln["advisory"].get("identifiers", [])
+                cve_id = next((i["value"] for i in identifiers if i["type"] == "CVE"), "")
+                
+                # EPSS (悪用確率) 取得
+                epss = get_epss_score(cve_id) if cve_id else 0
+
+                # ★判定ロジック★
+                is_dangerous = (severity == "CRITICAL") or \
+                               (severity == "HIGH" and epss >= EPSS_THRESHOLD)
+
+                if is_dangerous:
+                    msg = f"📦 *{pkg_name}* ({severity})\nCVSS: {cvss} | EPSS: {epss:.2%}\nCVE: {cve_id}"
+                    notifications.append(msg)
+            except Exception as e:
+                print(f"Error processing SCA alert: {e}")
+                continue
+    else:
+        print("Info: No SCA alerts found or Dependabot is disabled.")
+
+    # 3. SAST (Code Scanning) のフィルタリング
+    if repo_data.get("codeScanningAlerts") and repo_data["codeScanningAlerts"].get("nodes"):
+        for alert in repo_data["codeScanningAlerts"]["nodes"]:
+            try:
+                # Code Scanningはルールやインスタンス情報が稀に欠落することがあるためガード
+                if not alert.get("rule") or not alert.get("mostRecentInstance"):
+                    continue
+
+                rule_sev = alert["rule"]["securitySeverityLevel"]
+                tool = alert["tool"]["name"]
+                
+                msg_obj = alert["mostRecentInstance"].get("message", {})
+                msg_text = msg_obj.get("text", "No description")
+                
+                loc_obj = alert["mostRecentInstance"].get("location", {})
+                path = loc_obj.get("path", "unknown")
+
+                # ★判定ロジック★
+                if rule_sev in ["CRITICAL", "HIGH"]:
+                    msg = f"🛡️ *{tool}* ({rule_sev})\nFile: `{path}`\nMsg: {msg_text}"
+                    notifications.append(msg)
+            except Exception as e:
+                print(f"Error processing SAST alert: {e}")
+                continue
+    else:
+        print("Info: No Code Scanning alerts found or feature is disabled.")
+
+    # 4. Slack通知
+    if notifications:
+        print(f"Sending {len(notifications)} alerts to Slack...")
+        slack_payload = {
+            "blocks": [
+                {
+                    "type": "header",
+                    "text": {"type": "plain_text", "text": "🚨 Security Daily Digest (Priority Only)"}
+                },
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "以下の優先対応が必要です："}
+                },
+                {"type": "divider"}
+            ]
+        }
+        
+        for note in notifications[:10]:
+            slack_payload["blocks"].append({
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": msg}
+                "text": {"type": "mrkdwn", "text": note}
             })
-            
-        if len(messages) > 15:
-             blocks.append({
+        
+        if len(notifications) > 10:
+             slack_payload["blocks"].append({
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": f"...他 {len(messages)-15} 件のアラートがあります。GitHubを確認してください。"}
+                "text": {"type": "mrkdwn", "text": f"...他 {len(notifications)-10} 件のアラートがあります。GitHubを確認してください。"}
             })
 
-        payload = {"blocks": blocks}
-        requests.post(SLACK_WEBHOOK_URL, json=payload)
-        print("Sent to Slack.")
+        try:
+            res = requests.post(SLACK_WEBHOOK_URL, json=slack_payload)
+            if res.status_code == 200:
+                print("Notification sent successfully!")
+            else:
+                print(f"Slack Error {res.status_code}: {res.text}")
+        except Exception as e:
+            print(f"Slack Connection Error: {e}")
     else:
-        print("No priority alerts found. Good job!")
+        print("No critical alerts found (Clean).")
 
 if __name__ == "__main__":
     run()
