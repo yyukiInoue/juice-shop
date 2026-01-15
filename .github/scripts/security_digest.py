@@ -171,7 +171,7 @@ def run():
                 {"type": "divider"}
             ]
         }
-        for note in notifications[:15]: # 少し枠を増やしました
+        for note in notifications[:45]: # 少し枠を増やしました
             slack_payload["blocks"].append({
                 "type": "section", "text": {"type": "mrkdwn", "text": note}
             })
