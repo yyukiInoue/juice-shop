@@ -140,10 +140,10 @@ def run():
         
         data = resp.json()
         
-        # エラー（機能が無効など）があっても、SCAが取れていればOKとする
+        # ★ここを修正！エラー詳細を隠さず表示する
         if "errors" in data:
-            print("  [SAST Info] Code Scanning not ready or disabled. Skipping.")
-            # エラーログはあえて出さない（ノイズになるため）
+            print("  [SAST Warning] GitHub returned errors:")
+            print(json.dumps(data["errors"], indent=2)) # <--- エラーの正体を表示！
         
         elif data.get("data") and data["data"].get("repository"):
             alerts = data["data"]["repository"].get("codeScanningAlerts", {}).get("nodes", [])
@@ -153,10 +153,18 @@ def run():
                 if alert.get("state") != "OPEN":
                     continue
                 
+                # ルール情報やメッセージが無い場合のエラー回避
+                if not alert.get("rule") or not alert.get("mostRecentInstance"):
+                    continue
+
                 rule_sev = alert["rule"]["securitySeverityLevel"]
                 tool = alert["tool"]["name"]
-                path = alert["mostRecentInstance"]["location"]["path"]
-                msg_text = alert["mostRecentInstance"]["message"]["text"]
+                
+                msg_obj = alert["mostRecentInstance"].get("message", {})
+                msg_text = msg_obj.get("text", "No description")
+                
+                loc_obj = alert["mostRecentInstance"].get("location", {})
+                path = loc_obj.get("path", "unknown")
 
                 if rule_sev in ["CRITICAL", "HIGH"]:
                     msg = f"🛡️ *{tool}* ({rule_sev})\nFile: `{path}`\nMsg: {msg_text}"
