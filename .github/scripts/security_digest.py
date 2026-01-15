@@ -118,9 +118,13 @@ def run():
                 epss = get_epss_score(cve_id) if cve_id else 0
 
                 # 判定
-                if (severity == "CRITICAL") or (severity == "HIGH" and epss >= EPSS_THRESHOLD):
-                    msg = f"📦 *{pkg_name}* ({severity})\nCVSS: {cvss} | EPSS: {epss:.2%}\nCVE: {cve_id}"
-                    notifications.append(msg)
+                # if (severity == "CRITICAL") or (severity == "HIGH" and epss >= EPSS_THRESHOLD):
+                #     msg = f"📦 *{pkg_name}* ({severity})\nCVSS: {cvss} | EPSS: {epss:.2%}\nCVE: {cve_id}"
+                #     notifications.append(msg)
+      # 判定（テストのため全許可！）
+                msg = f"📦 [TEST] *{pkg_name}* ({severity})\nCVSS: {cvss} | EPSS: {epss:.2%}\nCVE: {cve_id}"
+                notifications.append(msg)
+                print(f"  -> Added to notification: {pkg_name} ({severity})")
         else:
             print("  [SCA Info] No data returned.")
 
