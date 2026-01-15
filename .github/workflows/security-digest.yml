@@ -33,6 +33,6 @@ jobs:
           # リポジトリのSecretsに登録したSlack URL
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           # GitHub標準トークン
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.MY_SECURITY_TOKEN }}
         run: |
           python .github/scripts/security_digest.py
