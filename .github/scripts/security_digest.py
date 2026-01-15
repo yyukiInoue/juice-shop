@@ -102,12 +102,13 @@ def run():
     # ★【修正点】エラーの詳細な理由をログに出す処理を追加
     if "errors" in data:
         print("GraphQL Errors found:")
+        # エラー内容を整形して表示
         print(json.dumps(data["errors"], indent=2))
-        # エラーがあっても、取れているデータがあれば続行する
 
     # ★【修正点】データが空(None)の場合にクラッシュさせないガードを追加
+    # 権限がない場合、data["data"] は None になることがあります
     if not data.get("data") or not data["data"].get("repository"):
-        print("Error: No repository data returned. Check permissions or repository name.")
+        print("Error: No repository data returned. Please check permissions (YAML) and repository name.")
         return
 
     repo_data = data["data"]["repository"]
