@@ -13,13 +13,15 @@ SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 CVSS_THRESHOLD = 7.0      # これ以上のスコアを対象
 EPSS_THRESHOLD = 0.01     # 1%以上の悪用確率なら対象 (0.01)
 
-# --- GraphQL Query (SCAとSASTを取得) ---
+# --- GraphQL Query (修正版) ---
+# 修正点: vulnerabilityAlerts の引数から state: OPEN を削除し、取得フィールドに state を追加
 QUERY = """
 query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
-    vulnerabilityAlerts(first: 50, state: OPEN) {
+    vulnerabilityAlerts(first: 50) {
       nodes {
         createdAt
+        state
         securityVulnerability {
           package { name }
           severity
@@ -99,42 +101,41 @@ def run():
         
     data = resp.json()
     
-    # ★【修正点】エラーの詳細な理由をログに出す処理を追加
+    # エラーの詳細ログ
     if "errors" in data:
         print("GraphQL Errors found:")
-        # エラー内容を整形して表示
         print(json.dumps(data["errors"], indent=2))
+        # エラーがあっても、Code Scanningが取れないだけでSCAは取れている場合があるので続行を試みる
 
-    # ★【修正点】データが空(None)の場合にクラッシュさせないガードを追加
-    # 権限がない場合、data["data"] は None になることがあります
     if not data.get("data") or not data["data"].get("repository"):
-        print("Error: No repository data returned. Please check permissions (YAML) and repository name.")
+        print("Error: No repository data returned. Check permissions or repository name.")
         return
 
     repo_data = data["data"]["repository"]
     notifications = []
 
     # 2. SCA (Dependabot) のフィルタリング
-    # ★【修正点】Dependabotが無効だとここがNoneになる可能性があるのでチェック
     if repo_data.get("vulnerabilityAlerts") and repo_data["vulnerabilityAlerts"].get("nodes"):
         for alert in repo_data["vulnerabilityAlerts"]["nodes"]:
             try:
+                # 【修正点】ここでステータスがOPENかチェックする
+                if alert.get("state") != "OPEN":
+                    continue
+
                 vuln = alert["securityVulnerability"]
                 pkg_name = vuln["package"]["name"]
                 severity = vuln["severity"]
                 
-                # CVSS取得 (無い場合は0)
+                # CVSS取得
                 cvss_data = vuln["advisory"].get("cvss")
                 cvss = cvss_data["score"] if cvss_data else 0
                 
-                # CVE IDを取得
                 identifiers = vuln["advisory"].get("identifiers", [])
                 cve_id = next((i["value"] for i in identifiers if i["type"] == "CVE"), "")
                 
-                # EPSS (悪用確率) 取得
                 epss = get_epss_score(cve_id) if cve_id else 0
 
-                # ★判定ロジック★
+                # 判定ロジック
                 is_dangerous = (severity == "CRITICAL") or \
                                (severity == "HIGH" and epss >= EPSS_THRESHOLD)
 
@@ -151,7 +152,6 @@ def run():
     if repo_data.get("codeScanningAlerts") and repo_data["codeScanningAlerts"].get("nodes"):
         for alert in repo_data["codeScanningAlerts"]["nodes"]:
             try:
-                # Code Scanningはルールやインスタンス情報が稀に欠落することがあるためガード
                 if not alert.get("rule") or not alert.get("mostRecentInstance"):
                     continue
 
@@ -164,7 +164,6 @@ def run():
                 loc_obj = alert["mostRecentInstance"].get("location", {})
                 path = loc_obj.get("path", "unknown")
 
-                # ★判定ロジック★
                 if rule_sev in ["CRITICAL", "HIGH"]:
                     msg = f"🛡️ *{tool}* ({rule_sev})\nFile: `{path}`\nMsg: {msg_text}"
                     notifications.append(msg)
@@ -172,7 +171,8 @@ def run():
                 print(f"Error processing SAST alert: {e}")
                 continue
     else:
-        print("Info: No Code Scanning alerts found or feature is disabled.")
+        # Code Scanningのエラーが出ていても、ここがNoneになるだけでスクリプトは落ちない
+        print("Info: No Code Scanning alerts found or feature is disabled/not ready.")
 
     # 4. Slack通知
     if notifications:
