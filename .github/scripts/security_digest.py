@@ -165,43 +165,59 @@ def run():
             notifications.append(msg)
 
     # ==========================================
-    # 4. Slack通知
+    # 4. Slack通知 (分割送信対応版)
     # ==========================================
     if notifications and SLACK_WEBHOOK_URL:
-        print(f"Sending {len(notifications)} alerts to Slack...")
+        total_count = len(notifications)
+        print(f"Sending {total_count} alerts to Slack...")
         
-        slack_payload = {
-            "blocks": [
-                {"type": "header", "text": {"type": "plain_text", "text": "🚨 Security Daily Digest"}},
-                {"type": "divider"}
-            ]
-        }
+        # 1通あたりに載せる件数 (ヘッダー分を考慮して40件程度が安全)
+        CHUNK_SIZE = 40
         
-        # 上限45件まで
-        for note in notifications[:45]:
-            slack_payload["blocks"].append({
-                "type": "section", "text": {"type": "mrkdwn", "text": note}
-            })
+        # リストを CHUNK_SIZE ずつ切り出してループ処理
+        for i in range(0, total_count, CHUNK_SIZE):
+            # 今回送る分 (例: 0~40件目, 40~80件目...)
+            chunk = notifications[i : i + CHUNK_SIZE]
+            
+            # ページ番号 (例: 1/3)
+            current_page = (i // CHUNK_SIZE) + 1
+            total_pages = (total_count + CHUNK_SIZE - 1) // CHUNK_SIZE
+            
+            header_text = f"🚨 Security Alert ({current_page}/{total_pages})"
+            if total_pages > 1:
+                header_text += f" - showing {i+1} to {min(i+len(chunk), total_count)} of {total_count}"
 
-        if len(notifications) > 45:
-             slack_payload["blocks"].append({
-                "type": "context",
-                "elements": [{"type": "mrkdwn", "text": f"⚠️ ...and {len(notifications) - 45} more alerts. Check GitHub Security tab."}]
-            })
+            slack_payload = {
+                "blocks": [
+                    {"type": "header", "text": {"type": "plain_text", "text": header_text}},
+                    {"type": "divider"}
+                ]
+            }
+            
+            for note in chunk:
+                slack_payload["blocks"].append({
+                    "type": "section", "text": {"type": "mrkdwn", "text": note}
+                })
 
-        req = urllib.request.Request(
-            SLACK_WEBHOOK_URL,
-            data=json.dumps(slack_payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST"
-        )
-        try:
-            with urllib.request.urlopen(req) as res:
-                print("Notification sent successfully!")
-        except urllib.error.HTTPError as e:
-            print(f"  [Slack Error] {e.code}: {e.read().decode('utf-8')}")
-        except Exception as e:
-            print(f"  [Slack Error] {e}")
+            # 送信処理
+            req = urllib.request.Request(
+                SLACK_WEBHOOK_URL,
+                data=json.dumps(slack_payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            
+            try:
+                with urllib.request.urlopen(req) as res:
+                    print(f"  Batch {current_page} sent successfully.")
+            except urllib.error.HTTPError as e:
+                print(f"  [Slack Error] Batch {current_page} failed: {e.code} {e.read().decode('utf-8')}")
+            except Exception as e:
+                print(f"  [Slack Error] Batch {current_page} error: {e}")
+            
+            # 【重要】連投でSlack側に拒否されないよう、少し待機する
+            time.sleep(3)
+
     else:
         print("No critical alerts found or Webhook URL missing.")
 
