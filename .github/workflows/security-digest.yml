@@ -3,36 +3,40 @@ name: Security Daily Digest
 on:
   schedule:
     # 日本時間 朝10時 (UTC 1:00) に実行
-    - cron: '0 1 * * 1-5' # 平日のみ
-  workflow_dispatch: # 手動実行ボタンも有効化
+    - cron: '0 1 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   notify:
     runs-on: ubuntu-latest
-    permissions:
-      security-events: read
-      contents: read
-      # Dependabotのアラートを読む権限が必要な場合、GraphQLでは通常token scopeが重要です
-      # GITHUB_TOKENの権限が足りない場合、PAT(Personal Access Token)が必要になることがあります
-      
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      # GitHub Appを使ってトークンを取得
+      - name: Generate GitHub App Token
+        id: generate_token
+        uses: actions/create-github-app-token@v1
         with:
-          python-version: '3.14'
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
 
-      - name: Install dependencies
-        run: |
-          pip install requests==2.32.5
+      # Python 3.14 のセットアップ
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14' 
 
+      # 標準ライブラリ(urllib)のみで動作するスクリプトを実行
       - name: Run Security Digest Script
         env:
           # リポジトリのSecretsに登録したSlack URL
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          # GitHub標準トークン
-          GITHUB_TOKEN: ${{ secrets.MY_SECURITY_TOKEN }}
+          # Stepで生成したApp Tokenを環境変数に渡す
+          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
         run: |
           python .github/scripts/security_digest.py
