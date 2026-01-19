@@ -167,7 +167,7 @@ def run():
         else:
             print(f"  [Secret Info] API returned unexpected format (Likely disabled).")
 
-    # ==========================================
+# ==========================================
     # 4. Slack通知
     # ==========================================
     if notifications and SLACK_WEBHOOK_URL:
@@ -180,14 +180,22 @@ def run():
             ]
         }
         
-        # Slackのブロック制限（50個）を考慮してカット
+        # 【修正】区切り線を削除したため、上限ギリギリの45件まで表示可能です
+        # (Header 1 + Divider 1 + Alerts 45 = 47 blocks < 50 limit)
         for note in notifications[:45]:
             slack_payload["blocks"].append({
                 "type": "section", "text": {"type": "mrkdwn", "text": note}
             })
-            slack_payload["blocks"].append({"type": "divider"})
+            # 削除: slack_payload["blocks"].append({"type": "divider"}) 
 
-        # WebhookへPOST（ここもurllibで）
+        # もし45件を超える場合、末尾にリンクなどを付けると親切です（任意）
+        if len(notifications) > 45:
+             slack_payload["blocks"].append({
+                "type": "context",
+                "elements": [{"type": "mrkdwn", "text": f"⚠️ ...and {len(notifications) - 45} more alerts. Check GitHub Security tab."}]
+            })
+
+        # WebhookへPOST
         req = urllib.request.Request(
             SLACK_WEBHOOK_URL,
             data=json.dumps(slack_payload).encode("utf-8"),
@@ -197,6 +205,9 @@ def run():
         try:
             with urllib.request.urlopen(req) as res:
                 print("Notification sent successfully!")
+        except urllib.error.HTTPError as e:
+             # エラーの詳細を出力してデバッグしやすくする
+            print(f"  [Slack Error] {e.code}: {e.read().decode('utf-8')}")
         except Exception as e:
             print(f"  [Slack Error] {e}")
     else:
