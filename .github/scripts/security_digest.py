@@ -5,10 +5,8 @@ import urllib.error
 import time
 
 # --- 設定 ---
-# GitHub Appで取得したトークンを受け取る
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 REPO_OWNER = os.getenv("GITHUB_REPOSITORY_OWNER")
-# GITHUB_REPOSITORY は "owner/repo" の形式なので分割
 REPO_NAME = os.getenv("GITHUB_REPOSITORY").split("/")[-1]
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 
@@ -17,12 +15,14 @@ CVSS_THRESHOLD = 7.0
 EPSS_THRESHOLD = 0.01
 
 # --- GraphQL Query (SCA / Dependabot) ---
+# 【変更】number (アラート番号) を追加してURLを作れるようにしました
 QUERY_SCA = """
 query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
     vulnerabilityAlerts(first: 50, states: OPEN) {
       nodes {
         createdAt
+        number
         securityVulnerability {
           package { name }
           severity
@@ -42,7 +42,6 @@ def make_request(url, method="GET", data=None, headers=None):
     if headers is None:
         headers = {}
     
-    # デフォルトヘッダー
     if "Authorization" not in headers:
         headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
     if "Accept" not in headers:
@@ -69,7 +68,6 @@ def get_epss_score(cve_id):
         return 0.0
     
     url = f"https://api.first.org/data/v1/epss?cve={cve_id}"
-    # 外部APIなので認証ヘッダーを除外してコール
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "GHAS-Digest"})
         with urllib.request.urlopen(req) as response:
@@ -90,7 +88,6 @@ def run():
     print("Fetching SCA (Dependabot) alerts...")
     variables = {"owner": REPO_OWNER, "name": REPO_NAME}
     
-    # GraphQLはPOSTで送信
     response = make_request(
         "https://api.github.com/graphql", 
         method="POST", 
@@ -103,30 +100,32 @@ def run():
 
         for alert in alerts:
             vuln = alert["securityVulnerability"]
-            severity = vuln["severity"] # CRITICAL, HIGH, MODERATE, LOW
+            severity = vuln["severity"]
             pkg_name = vuln["package"]["name"]
+            
+            # 詳細URLを生成
+            alert_number = alert.get("number")
+            alert_url = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/security/dependabot/{alert_number}"
             
             advisory = vuln["advisory"]
             cvss = advisory["cvss"]["score"] if advisory["cvss"] else 0
             identifiers = advisory.get("identifiers", [])
             cve_id = next((i["value"] for i in identifiers if i["type"] == "CVE"), "")
             
-            # EPSS取得 (APIレート制限考慮で少し待機しても良いが今回は直列実行)
             epss = get_epss_score(cve_id) if cve_id else 0
 
-            # フィルタリングロジック
             is_critical = severity == "CRITICAL"
             is_high_risk = severity == "HIGH" and epss >= EPSS_THRESHOLD
             
             if is_critical or is_high_risk:
-                msg = f"📦 *{pkg_name}* ({severity})\nCVSS: {cvss} | EPSS: {epss:.2%}\nCVE: {cve_id}"
+                # 【変更】URLリンクを追加
+                msg = f"📦 *{pkg_name}* ({severity})\nCVSS: {cvss} | EPSS: {epss:.2%}\n<{alert_url}|View Alert>"
                 notifications.append(msg)
 
     # ==========================================
     # 2. SAST (Code Scanning) - REST API
     # ==========================================
     print("Fetching SAST (Code Scanning) alerts...")
-    # URLパラメータを手動構築
     sast_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/code-scanning/alerts?state=open&per_page=50&severity=critical,high"
     
     sast_alerts = make_request(sast_url)
@@ -138,11 +137,13 @@ def run():
             tool = alert.get("tool", {}).get("name", "Unknown")
             
             instance = alert.get("most_recent_instance", {})
-            msg_text = instance.get("message", {}).get("text", "No message")
             path = instance.get("location", {}).get("path", "unknown")
+            
+            # 【変更】メッセージ本文(msg_text)を削除し、詳細URLのみにする
+            html_url = alert.get("html_url", "") # これがGitHubの詳細画面URL
 
             if severity in ["CRITICAL", "HIGH"]:
-                msg = f"🛡️ *{tool}* ({severity})\nFile: `{path}`\nMsg: {msg_text}"
+                msg = f"🛡️ *{tool}* ({severity})\nFile: `{path}`\n<{html_url}|View Alert>"
                 notifications.append(msg)
 
     # ==========================================
@@ -153,21 +154,17 @@ def run():
     
     secret_alerts = make_request(secret_url)
     
-    # Secret Scanningが無効な場合は404が返るためNoneチェック
-    if secret_alerts is not None:
-        # エラー時はdictが返ることもあるのでリストか確認
-        if isinstance(secret_alerts, list):
-            print(f"  Found {len(secret_alerts)} Secret entries.")
-            for alert in secret_alerts:
-                secret_type = alert.get("secret_type_display_name") or alert.get("secret_type")
-                html_url = alert.get("html_url")
-                
-                msg = f"🔑 *Secret Detected* (CRITICAL)\nType: `{secret_type}`\nLink: {html_url}"
-                notifications.append(msg)
-        else:
-            print(f"  [Secret Info] API returned unexpected format (Likely disabled).")
+    if secret_alerts is not None and isinstance(secret_alerts, list):
+        print(f"  Found {len(secret_alerts)} Secret entries.")
+        for alert in secret_alerts:
+            secret_type = alert.get("secret_type_display_name") or alert.get("secret_type")
+            html_url = alert.get("html_url")
+            
+            # ここもフォーマットを統一
+            msg = f"🔑 *Secret Detected* (CRITICAL)\nType: `{secret_type}`\n<{html_url}|View Alert>"
+            notifications.append(msg)
 
-# ==========================================
+    # ==========================================
     # 4. Slack通知
     # ==========================================
     if notifications and SLACK_WEBHOOK_URL:
@@ -180,22 +177,18 @@ def run():
             ]
         }
         
-        # 【修正】区切り線を削除したため、上限ギリギリの45件まで表示可能です
-        # (Header 1 + Divider 1 + Alerts 45 = 47 blocks < 50 limit)
+        # 上限45件まで
         for note in notifications[:45]:
             slack_payload["blocks"].append({
                 "type": "section", "text": {"type": "mrkdwn", "text": note}
             })
-            # 削除: slack_payload["blocks"].append({"type": "divider"}) 
 
-        # もし45件を超える場合、末尾にリンクなどを付けると親切です（任意）
         if len(notifications) > 45:
              slack_payload["blocks"].append({
                 "type": "context",
                 "elements": [{"type": "mrkdwn", "text": f"⚠️ ...and {len(notifications) - 45} more alerts. Check GitHub Security tab."}]
             })
 
-        # WebhookへPOST
         req = urllib.request.Request(
             SLACK_WEBHOOK_URL,
             data=json.dumps(slack_payload).encode("utf-8"),
@@ -206,7 +199,6 @@ def run():
             with urllib.request.urlopen(req) as res:
                 print("Notification sent successfully!")
         except urllib.error.HTTPError as e:
-             # エラーの詳細を出力してデバッグしやすくする
             print(f"  [Slack Error] {e.code}: {e.read().decode('utf-8')}")
         except Exception as e:
             print(f"  [Slack Error] {e}")
