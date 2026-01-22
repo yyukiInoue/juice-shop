@@ -81,30 +81,31 @@ def get_epss_score(cve_id):
     return 0.0
 
 # --- 関数: 優先度レベル判定ロジック ---
+# 【修正箇所】ここから下のインデントを修正しました
 def calculate_priority(is_kev, scope, vector_string, severity, epss, has_fix):
-is_network = "AV:N" in (vector_string or "")
+    is_network = "AV:N" in (vector_string or "")
 
-# Lv.1: CISA KEV掲載 (最優先)
-if is_kev:
-return "🚨 Lv.1 Emergency (即時対応)", "danger"
+    # Lv.1: CISA KEV掲載 (最優先)
+    if is_kev:
+        return "🚨 Lv.1 Emergency (即時対応)", "danger"
 
-# Lv.2: Runtime × Network × (EPSS高 or Critical)
-# 確率が高い、または致命的なものは「危険」
-is_runtime = (scope == "RUNTIME")
+    # Lv.2: Runtime × Network × (EPSS高 or Critical)
+    # 確率が高い、または致命的なものは「危険」
+    is_runtime = (scope == "RUNTIME")
 
-if is_runtime and is_network and (epss >= EPSS_THRESHOLD):
-return "🔥 Lv.2 Danger (当日〜翌日)", "danger"
+    if is_runtime and is_network and (epss >= EPSS_THRESHOLD):
+        return "🔥 Lv.2 Danger (当日〜翌日)", "danger"
 
-# Lv.3: Runtime × Network × (Critical OR High)
-# ★修正ポイント: CRITICALだけでなくHIGH(7.0以上)も含める
-if is_runtime and is_network and severity in ["CRITICAL", "HIGH"]:
-return "⚠️ Lv.3 Warning (週次監視)", "warning"
+    # Lv.3: Runtime × Network × (Critical OR High)
+    # ★修正ポイント: CRITICALだけでなくHIGH(7.0以上)も含める
+    if is_runtime and is_network and severity in ["CRITICAL", "HIGH"]:
+        return "⚠️ Lv.3 Warning (週次監視)", "warning"
 
-# Lv.4: Dev環境 or Local攻撃
-if scope == "DEVELOPMENT" or not is_network:
-return "☕ Lv.4 Periodic (月次対応)", "good"
+    # Lv.4: Dev環境 or Local攻撃
+    if scope == "DEVELOPMENT" or not is_network:
+        return "☕ Lv.4 Periodic (月次対応)", "good"
 
-return "👀 Check Needed", "default"
+    return "👀 Check Needed", "default"
 
 # --- GraphQL Query ---
 QUERY_SCA = """
@@ -209,7 +210,7 @@ def run():
                 
                 kev_header_info = " | 💀 CISA KEV" if is_in_kev else ""
 
-                # アスタリスクを全削除し、シンプルなテキストに整形
+                # メッセージの整形
                 msg_text = f"""{priority_label}
 📦 {pkg_name} ({severity}){kev_header_info}
 ────────────────
