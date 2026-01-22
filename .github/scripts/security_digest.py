@@ -84,25 +84,27 @@ def get_epss_score(cve_id):
 def calculate_priority(is_kev, scope, vector_string, severity, epss, has_fix):
     is_network = "AV:N" in (vector_string or "")
     
+    # アスタリスクを削除したプレーンテキストに変更
+    
     # Lv.1: CISA KEV掲載
     if is_kev:
-        return "🚨 *Lv.1 Emergency* (即時対応)", "danger"
+        return "🚨 Lv.1 Emergency (即時対応)", "danger"
 
     # Lv.2: Runtime × Network × (EPSS高 or Critical)
     is_runtime = (scope == "RUNTIME")
     
     if is_runtime and is_network and (epss >= EPSS_THRESHOLD):
-        return "🔥 *Lv.2 Danger* (当日〜翌日)", "danger"
+        return "🔥 Lv.2 Danger (当日〜翌日)", "danger"
     
     # Lv.3: Runtime × Network × Critical (EPSS低)
     if is_runtime and is_network and severity == "CRITICAL":
-        return "⚠️ *Lv.3 Warning* (週次監視)", "warning"
+        return "⚠️ Lv.3 Warning (週次監視)", "warning"
 
     # Lv.4: Dev環境 or Local攻撃
     if scope == "DEVELOPMENT" or not is_network:
-        return "☕ *Lv.4 Periodic* (月次対応)", "good"
+        return "☕ Lv.4 Periodic (月次対応)", "good"
     
-    return "👀 *Check Needed*", "default"
+    return "👀 Check Needed", "default"
 
 # --- GraphQL Query ---
 QUERY_SCA = """
@@ -200,18 +202,25 @@ def run():
                 priority_label.startswith("⚠️") or
                 severity in ["CRITICAL", "HIGH"]):
                 
-                kev_info = " | 💀 *CISA KEV (悪用事実あり)*" if is_in_kev else ""
+                if is_in_kev:
+                    kev_display = "💀 Yes (悪用確認済)"
+                else:
+                    kev_display = "🛡️ No (未掲載)"
                 
-                msg_text = f"""*{priority_label}*
-📦 *{pkg_name}* ({severity}){kev_info}
-────────────────
-• *Scope:* {scope_display}
-• *Path:* {path_display}
-• *Status:* {fix_display}
+                kev_header_info = " | 💀 CISA KEV" if is_in_kev else ""
 
-📊 *Scores:*
-• EPSS: `{epss:.2%}`
-• CVSS: `{cvss_score}`
+                # アスタリスクを全削除し、シンプルなテキストに整形
+                msg_text = f"""{priority_label}
+📦 {pkg_name} ({severity}){kev_header_info}
+────────────────
+• CISA KEV: {kev_display}
+• Scope: {scope_display}
+• Path: {path_display}
+• Status: {fix_display}
+
+📊 Scores:
+• EPSS: {epss:.2%}
+• CVSS: {cvss_score}
 🔗 {cve_id}"""
 
                 msg = {
@@ -247,7 +256,6 @@ def run():
                 ]
                 
                 for note in batch: 
-                    # 丸い絵文字を削除し、テキストのみを使用
                     blocks.append({
                         "type": "section",
                         "text": {
