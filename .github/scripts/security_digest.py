@@ -44,6 +44,7 @@ def http_request(url, method="GET", headers=None, data=None, params=None):
                 return json.loads(response_body)
             return {}
     except urllib.error.HTTPError as e:
+        # 404や403などはここでハンドリング（機能が無効な場合など）
         print(f"  [HTTP Error] {e.code}: {e.reason} (URL: {url})")
         return None
     except Exception as e:
@@ -81,7 +82,6 @@ def get_epss_score(cve_id):
     return 0.0
 
 # --- 関数: 優先度レベル判定ロジック ---
-# 【修正箇所】ここから下のインデントを修正しました
 def calculate_priority(is_kev, scope, vector_string, severity, epss, has_fix):
     is_network = "AV:N" in (vector_string or "")
 
@@ -90,14 +90,12 @@ def calculate_priority(is_kev, scope, vector_string, severity, epss, has_fix):
         return "🚨 Lv.1 Emergency (即時対応)", "danger"
 
     # Lv.2: Runtime × Network × (EPSS高 or Critical)
-    # 確率が高い、または致命的なものは「危険」
     is_runtime = (scope == "RUNTIME")
 
     if is_runtime and is_network and (epss >= EPSS_THRESHOLD):
         return "🔥 Lv.2 Danger (当日〜翌日)", "danger"
 
     # Lv.3: Runtime × Network × (Critical OR High)
-    # ★修正ポイント: CRITICALだけでなくHIGH(7.0以上)も含める
     if is_runtime and is_network and severity in ["CRITICAL", "HIGH"]:
         return "⚠️ Lv.3 Warning (週次監視)", "warning"
 
@@ -210,7 +208,6 @@ def run():
                 
                 kev_header_info = " | 💀 CISA KEV" if is_in_kev else ""
 
-                # メッセージの整形
                 msg_text = f"""{priority_label}
 📦 {pkg_name} ({severity}){kev_header_info}
 ────────────────
@@ -224,14 +221,71 @@ def run():
 • CVSS: {cvss_score}
 🔗 {cve_id}"""
 
-                msg = {
+                notifications.append({
                     "color": color_style,
                     "text": msg_text
-                }
-                notifications.append(msg)
+                })
 
     # ==========================================
-    # 2. Slack通知 (分割送信対応)
+    # 2. SAST (Code Scanning) - REST API
+    # ==========================================
+    print("Fetching SAST (Code Scanning) alerts...")
+    sast_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/code-scanning/alerts?state=open&per_page=50&severity=critical,high"
+    
+    # 【変更点】make_request -> http_requestに変更し、headersを渡す
+    sast_alerts = http_request(sast_url, headers=headers)
+    
+    # リスト形式で返ってきているか確認
+    if sast_alerts and isinstance(sast_alerts, list):
+        print(f"  Found {len(sast_alerts)} SAST entries (Critical/High).")
+        for alert in sast_alerts:
+            rule = alert.get("rule", {})
+            # CodeQL等は security_severity_level を持つが、他ツールは無い場合もあるので考慮
+            severity = rule.get("security_severity_level", "high").upper() 
+            tool = alert.get("tool", {}).get("name", "Unknown")
+            
+            instance = alert.get("most_recent_instance", {})
+            path = instance.get("location", {}).get("path", "unknown")
+            html_url = alert.get("html_url", "")
+
+            # 重大度フィルタ (念の為)
+            if severity in ["CRITICAL", "HIGH"]:
+                msg_text = f"🛡️ *{tool}* ({severity})\nFile: `{path}`\n<{html_url}|View Alert>"
+                # 【変更点】SCAに合わせて辞書形式で追加
+                notifications.append({
+                    "color": "danger",
+                    "text": msg_text
+                })
+    else:
+        print("  No SAST alerts found or API not enabled.")
+
+    # ==========================================
+    # 3. Secret Scanning - REST API
+    # ==========================================
+    print("Fetching Secret Scanning alerts...")
+    secret_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/secret-scanning/alerts?state=open&per_page=50"
+    
+    # 【変更点】make_request -> http_requestに変更し、headersを渡す
+    secret_alerts = http_request(secret_url, headers=headers)
+    
+    if secret_alerts and isinstance(secret_alerts, list):
+        print(f"  Found {len(secret_alerts)} Secret entries.")
+        for alert in secret_alerts:
+            secret_type = alert.get("secret_type_display_name") or alert.get("secret_type")
+            html_url = alert.get("html_url")
+            
+            msg_text = f"🔑 *Secret Detected* (CRITICAL)\nType: `{secret_type}`\n<{html_url}|View Alert>"
+            
+            # 【変更点】SCAに合わせて辞書形式で追加
+            notifications.append({
+                "color": "#FF0000",  # 赤色
+                "text": msg_text
+            })
+    else:
+        print("  No Secret alerts found or API not enabled.")
+
+    # ==========================================
+    # 4. Slack通知 (分割送信対応)
     # ==========================================
     if notifications:
         total_count = len(notifications)
@@ -257,6 +311,7 @@ def run():
                 ]
                 
                 for note in batch: 
+                    # note['text'] にアクセスするため、SCA/SAST/Secretすべてで辞書構造を統一した
                     blocks.append({
                         "type": "section",
                         "text": {
