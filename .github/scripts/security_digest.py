@@ -6,12 +6,15 @@ import urllib.parse
 import time
 
 # --- 設定 ---
-# トークンがない場合はエラーになるのを防ぐため get で取得
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-REPO_OWNER = os.getenv("GITHUB_REPOSITORY_OWNER")
-# リポジトリ名が取得できない場合の安全策
+# リポジトリ情報の取得（取得できない場合の安全策を追加）
 repo_env = os.getenv("GITHUB_REPOSITORY")
-REPO_NAME = repo_env.split("/")[-1] if repo_env else "unknown-repo"
+if repo_env and "/" in repo_env:
+    REPO_OWNER, REPO_NAME = repo_env.split("/")
+else:
+    REPO_OWNER = os.getenv("GITHUB_REPOSITORY_OWNER")
+    REPO_NAME = "unknown-repo"
+
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 
 # 閾値設定
@@ -82,6 +85,7 @@ def get_epss_score(cve_id):
 
 # --- 関数: 優先度レベル判定ロジック ---
 def calculate_priority(is_kev, scope, vector_string, severity, epss, has_fix):
+    # vector_stringがNoneの場合の対策
     is_network = "AV:N" in (vector_string or "")
     
     # Lv.1: CISA KEV掲載
@@ -186,7 +190,7 @@ def run():
             vector_string = advisory["cvss"]["vectorString"] if advisory["cvss"] else ""
             
             # Path (Attack Vector)
-            if "AV:N" in vector_string:
+            if "AV:N" in (vector_string or ""):
                 path_display = "🌐 Network (外部から攻撃可)"
             else:
                 path_display = "🔒 Local (内部のみ/安全)"
@@ -209,17 +213,60 @@ def run():
                 priority_label.startswith("⚠️") or
                 severity in ["CRITICAL", "HIGH"]):
                 
-                kev_info = "\n💀 *CISA KEV (悪用事実あり)*" if is_in_kev else ""
+                kev_info = " | 💀 *CISA KEV (悪用事実あり)*" if is_in_kev else ""
                 
-                msg_text = (
-                    f"*{priority_label}*\n"
-                    f"📦 *{pkg_name}* ({severity}){kev_info}\n"
-                    f"────────────────\n"
-                    f"• *Scope:* {scope_display}\n"
-                    f"• *Path:* {path_display}\n"
-                    f"• *Status:* {fix_display}\n"
-                    f"\n"
-                    f"📊 *Scores:*\n"
-                    f"• EPSS: `{epss:.2%}`\n"
-                    f"• CVSS: `{cvss_score}`\n"
-                    f"
+                # ★ 修正箇所: トリプルクォートで安全に記述
+                msg_text = f"""*{priority_label}*
+📦 *{pkg_name}* ({severity}){kev_info}
+────────────────
+• *Scope:* {scope_display}
+• *Path:* {path_display}
+• *Status:* {fix_display}
+
+📊 *Scores:*
+• EPSS: `{epss:.2%}`
+• CVSS: `{cvss_score}`
+🔗 {cve_id}"""
+
+                msg = {
+                    "color": color_style,
+                    "text": msg_text
+                }
+                notifications.append(msg)
+
+    # ==========================================
+    # 2. Slack通知 (Block Kit送信)
+    # ==========================================
+    if notifications:
+        print(f"Sending {len(notifications)} alerts to Slack...")
+        
+        blocks = [
+            {"type": "header", "text": {"type": "plain_text", "text": "🛡️ Security Triage Digest"}},
+            {"type": "divider"}
+        ]
+        
+        # Slack API制限考慮 (最大50ブロック程度推奨、ここでは安全に40件まで)
+        for note in notifications[:40]: 
+            color_emoji = "🔴" if note["color"] == "danger" else "🟡" if note["color"] == "warning" else "🔵"
+            
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"{color_emoji} {note['text']}"
+                }
+            })
+            blocks.append({"type": "divider"})
+
+        payload = {"blocks": blocks}
+        
+        if SLACK_WEBHOOK_URL:
+            http_request(SLACK_WEBHOOK_URL, method="POST", data=payload)
+            print("Done.")
+        else:
+            print("Skipped Slack notification (URL not set).")
+    else:
+        print("Clean.")
+
+if __name__ == "__main__":
+    run()
