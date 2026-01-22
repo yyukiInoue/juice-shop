@@ -80,37 +80,38 @@ def get_epss_score(cve_id):
             pass
     return 0.0
 
-# --- 関数: 優先度レベル判定ロジック (SCA用) ---
-def calculate_priority_sca(is_kev, scope, vector_string, severity, epss):
-    is_network = "AV:N" in (vector_string or "")
-    
-    # Lv.1: CISA KEV掲載
-    if is_kev:
-        return "🚨 Lv.1 Emergency (即時対応)", "danger"
+# --- 関数: 優先度レベル判定ロジック ---
+def calculate_priority(is_kev, scope, vector_string, severity, epss, has_fix):
+is_network = "AV:N" in (vector_string or "")
 
-    # Lv.2: Runtime × Network × (EPSS高 or Critical)
-    is_runtime = (scope == "RUNTIME")
-    if is_runtime and is_network and (epss >= EPSS_THRESHOLD):
-        return "🔥 Lv.2 Danger (当日〜翌日)", "danger"
-    
-    # Lv.3: Runtime × Network × (Critical OR High)
-    if is_runtime and is_network and severity in ["CRITICAL", "HIGH"]:
-        return "⚠️ Lv.3 Warning (週次監視)", "warning"
+# Lv.1: CISA KEV掲載 (最優先)
+if is_kev:
+return "🚨 Lv.1 Emergency (即時対応)", "danger"
 
-    # Lv.4: Dev環境 or Local攻撃
-    if scope == "DEVELOPMENT" or not is_network:
-        return "☕ Lv.4 Periodic (月次対応)", "good"
-    
-    return "👀 Check Needed", "default"
+# Lv.2: Runtime × Network × (EPSS高 or Critical)
+# 確率が高い、または致命的なものは「危険」
+is_runtime = (scope == "RUNTIME")
 
-# --- GraphQL Query (SCA) ---
-# numberフィールドを追加してリンク生成に使用
+if is_runtime and is_network and (epss >= EPSS_THRESHOLD):
+return "🔥 Lv.2 Danger (当日〜翌日)", "danger"
+
+# Lv.3: Runtime × Network × (Critical OR High)
+# ★修正ポイント: CRITICALだけでなくHIGH(7.0以上)も含める
+if is_runtime and is_network and severity in ["CRITICAL", "HIGH"]:
+return "⚠️ Lv.3 Warning (週次監視)", "warning"
+
+# Lv.4: Dev環境 or Local攻撃
+if scope == "DEVELOPMENT" or not is_network:
+return "☕ Lv.4 Periodic (月次対応)", "good"
+
+return "👀 Check Needed", "default"
+
+# --- GraphQL Query ---
 QUERY_SCA = """
 query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
     vulnerabilityAlerts(first: 50) {
       nodes {
-        number
         createdAt
         state
         dependencyScope
@@ -168,24 +169,23 @@ def run():
 
             vuln = alert["securityVulnerability"]
             pkg_name = vuln["package"]["name"]
-            severity = vuln["severity"] # CRITICAL, HIGH, etc.
-            alert_number = alert.get("number")
+            severity = vuln["severity"]
             
-            # URL生成
-            alert_link = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/security/dependabot/{alert_number}"
-
             raw_scope = alert.get("dependencyScope", "UNKNOWN")
             scope_display = "🚀 Runtime (本番)" if raw_scope == "RUNTIME" else "🛠 Dev (開発)"
             
             patched_ver = vuln.get("firstPatchedVersion")
             has_fix = True if patched_ver else False
-            fix_display = f"✅ Fix: `{patched_ver['identifier']}`" if has_fix else "🚫 No Fix"
+            fix_display = f"✅ Fix: `{patched_ver['identifier']}`" if has_fix else "🚫 No Fix (パッチなし)"
 
             advisory = vuln["advisory"]
             cvss_score = advisory["cvss"]["score"] if advisory["cvss"] else 0
             vector_string = advisory["cvss"]["vectorString"] if advisory["cvss"] else ""
             
-            path_display = "🌐 Network" if "AV:N" in (vector_string or "") else "🔒 Local"
+            if "AV:N" in (vector_string or ""):
+                path_display = "🌐 Network (外部から攻撃可)"
+            else:
+                path_display = "🔒 Local (内部のみ/安全)"
 
             identifiers = advisory.get("identifiers", [])
             cve_id = next((i["value"] for i in identifiers if i["type"] == "CVE"), "")
@@ -193,20 +193,24 @@ def run():
             epss = get_epss_score(cve_id) if cve_id else 0
             is_in_kev = cve_id in kev_cves
 
-            priority_label, color_style = calculate_priority_sca(
-                is_in_kev, raw_scope, vector_string, severity, epss
+            priority_label, color_style = calculate_priority(
+                is_in_kev, raw_scope, vector_string, severity, epss, has_fix
             )
 
-            # フィルタ: Lv.1-4 または High以上
             if (priority_label.startswith("🚨") or 
                 priority_label.startswith("🔥") or 
                 priority_label.startswith("⚠️") or
                 severity in ["CRITICAL", "HIGH"]):
                 
-                kev_display = "💀 Yes (悪用確認済)" if is_in_kev else "🛡️ No (未掲載)"
+                if is_in_kev:
+                    kev_display = "💀 Yes (悪用確認済)"
+                else:
+                    kev_display = "🛡️ No (未掲載)"
+                
                 kev_header_info = " | 💀 CISA KEV" if is_in_kev else ""
 
-                msg_text = f"""[SCA] {priority_label}
+                # アスタリスクを全削除し、シンプルなテキストに整形
+                msg_text = f"""{priority_label}
 📦 {pkg_name} ({severity}){kev_header_info}
 ────────────────
 • CISA KEV: {kev_display}
@@ -217,82 +221,16 @@ def run():
 📊 Scores:
 • EPSS: {epss:.2%}
 • CVSS: {cvss_score}
-🔗 <{alert_link}|View Alert>"""
+🔗 {cve_id}"""
 
-                notifications.append({"color": color_style, "text": msg_text})
-
-    # ==========================================
-    # 2. SAST (Code Scanning) Processing
-    # ==========================================
-    print("Fetching SAST (Code Scanning) alerts...")
-    # REST APIを使用
-    sast_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/code-scanning/alerts"
-    sast_params = {"state": "open", "per_page": 50} # 必要に応じてページング処理を追加
-    sast_data = http_request(sast_url, headers=headers, params=sast_params)
-
-    if isinstance(sast_data, list):
-        print(f"  Found {len(sast_data)} SAST entries.")
-        for alert in sast_data:
-            rule = alert.get("rule", {})
-            severity = rule.get("security_severity_level", "medium").upper() # critical, high, medium, low
-            
-            # High/Criticalのみ対象とする
-            if severity not in ["CRITICAL", "HIGH"]:
-                continue
-
-            tool_name = alert.get("tool", {}).get("name", "Unknown")
-            description = rule.get("description", "No description")
-            alert_link = alert.get("html_url")
-            
-            # SASTの簡易優先度判定
-            if severity == "CRITICAL":
-                p_label = "🔥 Lv.2 Danger (SAST Critical)"
-                c_style = "danger"
-            else:
-                p_label = "⚠️ Lv.3 Warning (SAST High)"
-                c_style = "warning"
-
-            msg_text = f"""[SAST] {p_label}
-🛡️ {tool_name}: {description}
-────────────────
-• Severity: {severity}
-• File: `{alert.get('most_recent_instance', {}).get('location', {}).get('path', 'unknown')}`
-
-🔗 <{alert_link}|View Alert>"""
-            
-            notifications.append({"color": c_style, "text": msg_text})
+                msg = {
+                    "color": color_style,
+                    "text": msg_text
+                }
+                notifications.append(msg)
 
     # ==========================================
-    # 3. Secret Scanning Processing
-    # ==========================================
-    print("Fetching Secret Scanning alerts...")
-    secret_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/secret-scanning/alerts"
-    secret_params = {"state": "open", "per_page": 50}
-    secret_data = http_request(secret_url, headers=headers, params=secret_params)
-
-    if isinstance(secret_data, list):
-        print(f"  Found {len(secret_data)} Secret entries.")
-        for alert in secret_data:
-            # Secretは問答無用でLv.1扱い（有効なら即死のため）
-            secret_type = alert.get("secret_type_display_name") or alert.get("secret_type")
-            alert_link = alert.get("html_url")
-            
-            p_label = "🚨 Lv.1 Emergency (Secret Leaked)"
-            c_style = "danger"
-
-            msg_text = f"""[Secret] {p_label}
-🔑 Type: {secret_type}
-────────────────
-• Status: Active (Open)
-• Action: Revoke immediately!
-
-🔗 <{alert_link}|View Alert>"""
-            
-            notifications.append({"color": c_style, "text": msg_text})
-
-
-    # ==========================================
-    # 4. Slack通知 (分割送信対応)
+    # 2. Slack通知 (分割送信対応)
     # ==========================================
     if notifications:
         total_count = len(notifications)
