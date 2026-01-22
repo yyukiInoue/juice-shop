@@ -7,7 +7,7 @@ import time
 
 # --- 設定 ---
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-# リポジトリ情報の取得（取得できない場合の安全策を追加）
+# リポジトリ情報の取得
 repo_env = os.getenv("GITHUB_REPOSITORY")
 if repo_env and "/" in repo_env:
     REPO_OWNER, REPO_NAME = repo_env.split("/")
@@ -18,22 +18,20 @@ else:
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 
 # 閾値設定
-CVSS_THRESHOLD = 1.0
-EPSS_THRESHOLD = 0.00  # 1%
+CVSS_THRESHOLD = 7.0
+EPSS_THRESHOLD = 0.01  # 1%
 
-# --- ヘルパー関数: HTTPリクエスト (Requestsライブラリの代用) ---
+# --- ヘルパー関数: HTTPリクエスト ---
 def http_request(url, method="GET", headers=None, data=None, params=None):
     if headers is None:
         headers = {}
     
-    # クエリパラメータの処理
     if params:
         query_string = urllib.parse.urlencode(params)
         url = f"{url}?{query_string}"
     
     req = urllib.request.Request(url, headers=headers, method=method)
     
-    # JSONデータの処理 (POST時など)
     if data:
         json_data = json.dumps(data).encode("utf-8")
         req.data = json_data
@@ -72,7 +70,6 @@ def get_epss_score(cve_id):
     url = "https://api.first.org/data/v1/epss"
     params = {"cve": cve_id}
     
-    # APIレート制限対策で少し待機
     time.sleep(0.1)
     
     data = http_request(url, params=params)
@@ -85,7 +82,6 @@ def get_epss_score(cve_id):
 
 # --- 関数: 優先度レベル判定ロジック ---
 def calculate_priority(is_kev, scope, vector_string, severity, epss, has_fix):
-    # vector_stringがNoneの場合の対策
     is_network = "AV:N" in (vector_string or "")
     
     # Lv.1: CISA KEV掲載
@@ -146,7 +142,6 @@ def run():
         "User-Agent": "Security-Digest-Script"
     }
     
-    # 1. KEVリストの準備
     kev_cves = get_cisa_kev_cves()
 
     # ==========================================
@@ -155,7 +150,6 @@ def run():
     print("Fetching SCA (Dependabot) alerts...")
     variables = {"owner": REPO_OWNER, "name": REPO_NAME}
     
-    # GraphQLはPOSTリクエスト
     data = http_request(
         "https://api.github.com/graphql",
         method="POST",
@@ -175,39 +169,32 @@ def run():
             pkg_name = vuln["package"]["name"]
             severity = vuln["severity"]
             
-            # Scope
             raw_scope = alert.get("dependencyScope", "UNKNOWN")
             scope_display = "🚀 Runtime (本番)" if raw_scope == "RUNTIME" else "🛠 Dev (開発)"
             
-            # Patch Status
             patched_ver = vuln.get("firstPatchedVersion")
             has_fix = True if patched_ver else False
             fix_display = f"✅ Fix: `{patched_ver['identifier']}`" if has_fix else "🚫 No Fix (パッチなし)"
 
-            # Advisory Info
             advisory = vuln["advisory"]
             cvss_score = advisory["cvss"]["score"] if advisory["cvss"] else 0
             vector_string = advisory["cvss"]["vectorString"] if advisory["cvss"] else ""
             
-            # Path (Attack Vector)
             if "AV:N" in (vector_string or ""):
                 path_display = "🌐 Network (外部から攻撃可)"
             else:
                 path_display = "🔒 Local (内部のみ/安全)"
 
-            # CVE & EPSS
             identifiers = advisory.get("identifiers", [])
             cve_id = next((i["value"] for i in identifiers if i["type"] == "CVE"), "")
             
             epss = get_epss_score(cve_id) if cve_id else 0
             is_in_kev = cve_id in kev_cves
 
-            # 優先度判定
             priority_label, color_style = calculate_priority(
                 is_in_kev, raw_scope, vector_string, severity, epss, has_fix
             )
 
-            # 通知対象フィルタ
             if (priority_label.startswith("🚨") or 
                 priority_label.startswith("🔥") or 
                 priority_label.startswith("⚠️") or
@@ -215,7 +202,6 @@ def run():
                 
                 kev_info = " | 💀 *CISA KEV (悪用事実あり)*" if is_in_kev else ""
                 
-                # ★ 修正箇所: トリプルクォートで安全に記述
                 msg_text = f"""*{priority_label}*
 📦 *{pkg_name}* ({severity}){kev_info}
 ────────────────
@@ -235,33 +221,48 @@ def run():
                 notifications.append(msg)
 
     # ==========================================
-    # 2. Slack通知 (Block Kit送信)
+    # 2. Slack通知 (分割送信対応)
     # ==========================================
     if notifications:
-        print(f"Sending {len(notifications)} alerts to Slack...")
+        total_count = len(notifications)
+        print(f"Sending {total_count} alerts to Slack...")
         
-        blocks = [
-            {"type": "header", "text": {"type": "plain_text", "text": "🛡️ Security Triage Digest"}},
-            {"type": "divider"}
-        ]
-        
-        # Slack API制限考慮 (最大50ブロック程度推奨、ここでは安全に40件まで)
-        for note in notifications[:40]: 
-            color_emoji = "🔴" if note["color"] == "danger" else "🟡" if note["color"] == "warning" else "🔵"
-            
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"{color_emoji} {note['text']}"
-                }
-            })
-            blocks.append({"type": "divider"})
-
-        payload = {"blocks": blocks}
+        BATCH_SIZE = 40
         
         if SLACK_WEBHOOK_URL:
-            http_request(SLACK_WEBHOOK_URL, method="POST", data=payload)
+            for i in range(0, total_count, BATCH_SIZE):
+                batch = notifications[i : i + BATCH_SIZE]
+                current_batch_num = (i // BATCH_SIZE) + 1
+                total_batches = (total_count + BATCH_SIZE - 1) // BATCH_SIZE
+                
+                blocks = [
+                    {
+                        "type": "header", 
+                        "text": {
+                            "type": "plain_text", 
+                            "text": f"🛡️ Security Triage Digest ({i+1}-{i+len(batch)}/{total_count})"
+                        }
+                    },
+                    {"type": "divider"}
+                ]
+                
+                for note in batch: 
+                    # 丸い絵文字を削除し、テキストのみを使用
+                    blocks.append({
+                        "type": "section",
+                        "text": {
+                            "type": "mrkdwn",
+                            "text": note['text']
+                        }
+                    })
+                    blocks.append({"type": "divider"})
+
+                payload = {"blocks": blocks}
+                
+                http_request(SLACK_WEBHOOK_URL, method="POST", data=payload)
+                print(f"  Sent batch {current_batch_num}/{total_batches}")
+                time.sleep(1)
+                
             print("Done.")
         else:
             print("Skipped Slack notification (URL not set).")
