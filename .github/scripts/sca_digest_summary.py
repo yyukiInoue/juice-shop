@@ -252,7 +252,7 @@ def run():
                         "type": "header", 
                         "text": {
                             "type": "plain_text", 
-                            "text": f"🛡️ Security Digest ({current_start}-{current_end}/{total_count})"
+                            "text": f"🛡️ Weekly SCA Digest ({current_start}-{current_end}/{total_count})"
                         }
                     },
                     {"type": "divider"}
