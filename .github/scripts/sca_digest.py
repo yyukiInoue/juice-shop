@@ -22,11 +22,9 @@ EPSS_THRESHOLD = 0.01  # 1%
 
 # --- ヘルパー関数: HTTPリクエスト ---
 def http_request(url, method="GET", headers=None, data=None, params=None):
-    if headers is None:
-        headers = {}
+    if headers is None: headers = {}
     if params:
-        query_string = urllib.parse.urlencode(params)
-        url = f"{url}?{query_string}"
+        url = f"{url}?{urllib.parse.urlencode(params)}"
     
     req = urllib.request.Request(url, headers=headers, method=method)
     if data:
@@ -60,8 +58,7 @@ def get_cisa_kev_cves():
 
 # --- 関数: EPSSスコアの取得 ---
 def get_epss_score(cve_id):
-    if not cve_id or not cve_id.startswith("CVE-"):
-        return 0.0
+    if not cve_id or not cve_id.startswith("CVE-"): return 0.0
     url = "https://api.first.org/data/v1/epss"
     params = {"cve": cve_id}
     time.sleep(0.1)
@@ -74,7 +71,6 @@ def get_epss_score(cve_id):
     return 0.0
 
 # --- 優先度レベル判定ロジック ---
-# 戻り値をタプル (label_text, color, level_id) に変更して判定しやすくしました
 def calculate_priority(is_kev, scope, vector_string, severity, epss, has_fix):
     is_network = "AV:N" in (vector_string or "")
     is_runtime = (scope == "RUNTIME")
@@ -102,7 +98,7 @@ def calculate_priority(is_kev, scope, vector_string, severity, epss, has_fix):
     # Lv.6: その他
     return "⚪ Lv.6 Low/Info (低リスク)", "#808080", 6
 
-# --- GraphQL Query (ページネーション対応) ---
+# --- GraphQL Query (numberを追加) ---
 QUERY_SCA = """
 query($owner: String!, $name: String!, $after: String) {
   repository(owner: $owner, name: $name) {
@@ -112,6 +108,7 @@ query($owner: String!, $name: String!, $after: String) {
         endCursor
       }
       nodes {
+        number
         createdAt
         state
         dependencyScope
@@ -162,7 +159,7 @@ def get_all_sca_alerts(headers):
         print(f"  Fetched {len(nodes)} alerts... (Total: {len(all_alerts)})")
         
         if has_next_page:
-            time.sleep(0.5) # レート制限対策
+            time.sleep(0.5)
 
     return all_alerts
 
@@ -183,7 +180,7 @@ def run():
     kev_cves = get_cisa_kev_cves()
 
     # ==========================================
-    # 1. SCA (Dependabot) Processing (全件取得)
+    # 1. SCA (Dependabot) Processing
     # ==========================================
     alerts = get_all_sca_alerts(headers)
     
@@ -215,13 +212,12 @@ def run():
             epss = get_epss_score(cve_id) if cve_id else 0
             is_in_kev = cve_id in kev_cves
 
-            # 判定ロジックの呼び出し (level_idを受け取るように変更)
+            # 判定ロジック
             priority_label, color_style, level_id = calculate_priority(
                 is_in_kev, raw_scope, vector_string, severity, epss, has_fix
             )
             
-            # --- フィルタリング処理 ---
-            # Lv.1 (Emergency) か Lv.2 (Danger) の場合のみ通知リストに追加
+            # --- フィルタリング (Lv.1 or Lv.2) ---
             if level_id > 2:
                 continue
             
@@ -230,13 +226,17 @@ def run():
             else:
                 kev_header_info = ""
 
+            # ★リンク生成処理を追加★
+            alert_number = alert.get("number")
+            alert_url = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/security/dependabot/{alert_number}"
+
             msg_text = f"""{priority_label}
 📦 {pkg_name} ({severity}){kev_header_info}
 ────────────────
 • Scope: {scope_display}
 • Status: {fix_display}
 📊 EPSS: {epss:.2%} / CVSS: {cvss_score}
-🔗 {cve_id}"""
+🔗 <{alert_url}|View Alert #{alert_number}> | CVE: {cve_id}"""
 
             msg = {
                 "color": color_style,
@@ -247,7 +247,7 @@ def run():
         print("  No SCA data found.")
 
     # ==========================================
-    # 2. Slack通知 (分割送信対応)
+    # 2. Slack通知
     # ==========================================
     if notifications:
         total_count = len(notifications)
