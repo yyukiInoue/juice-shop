@@ -7,7 +7,6 @@ import time
 
 # --- 設定 ---
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-# リポジトリ情報の取得
 repo_env = os.getenv("GITHUB_REPOSITORY")
 if repo_env and "/" in repo_env:
     REPO_OWNER, REPO_NAME = repo_env.split("/")
@@ -17,7 +16,7 @@ else:
 
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL")
 
-# 閾値設定
+# 閾値設定（今回は判定に使いますが、通知除外には使いません）
 CVSS_THRESHOLD = 7.0
 EPSS_THRESHOLD = 0.01  # 1%
 
@@ -50,20 +49,10 @@ def http_request(url, method="GET", headers=None, data=None, params=None):
         print(f"  [Connection Error] {e}")
         return None
 
-# --- ヘルパー関数: REST API用リクエスト (ページネーション対応) ---
-def make_request(url):
-    headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "Security-Digest-Script"
-    }
-    return http_request(url, headers=headers)
-
 # --- 関数: CISA KEVリストの取得 ---
 def get_cisa_kev_cves():
     url = "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json"
     print("Fetching CISA KEV Catalog...")
-    
     data = http_request(url)
     if data:
         kev_set = {v["cveID"] for v in data.get("vulnerabilities", [])}
@@ -75,12 +64,9 @@ def get_cisa_kev_cves():
 def get_epss_score(cve_id):
     if not cve_id or not cve_id.startswith("CVE-"):
         return 0.0
-    
     url = "https://api.first.org/data/v1/epss"
     params = {"cve": cve_id}
-    
     time.sleep(0.1)
-    
     data = http_request(url, params=params)
     if data and data.get("data"):
         try:
@@ -89,29 +75,35 @@ def get_epss_score(cve_id):
             pass
     return 0.0
 
-# --- 関数: SCA優先度レベル判定ロジック ---
+# --- 【変更点1】SCA優先度レベル判定ロジック（全レベル対応） ---
 def calculate_sca_priority(is_kev, scope, vector_string, severity, epss, has_fix):
     is_network = "AV:N" in (vector_string or "")
+    is_runtime = (scope == "RUNTIME")
 
     # Lv.1: CISA KEV掲載 (最優先)
     if is_kev:
         return "🚨 Lv.1 Emergency (即時対応)", "danger"
 
     # Lv.2: Runtime × Network × (EPSS高 or Critical)
-    is_runtime = (scope == "RUNTIME")
-
     if is_runtime and is_network and (epss >= EPSS_THRESHOLD):
-        return "🔥 Lv.2 Danger (当日〜翌日)", "danger"
+        return "🔥 Lv.2 Danger (高リスク)", "danger"
 
     # Lv.3: Runtime × Network × (Critical OR High)
     if is_runtime and is_network and severity in ["CRITICAL", "HIGH"]:
-        return "⚠️ Lv.3 Warning (週次監視)", "warning"
+        return "⚠️ Lv.3 Warning (要確認)", "warning"
 
-    # Lv.4: Dev環境 or Local攻撃
-    if scope == "DEVELOPMENT" or not is_network:
-        return "☕ Lv.4 Periodic (月次対応)", "good"
+    # --- 以下を追加してMedium/Low/Devも拾うように変更 ---
+    
+    # Lv.4: Medium Severity (Runtime)
+    if is_runtime and severity == "MEDIUM":
+        return "🟠 Lv.4 Medium (中程度)", "warning" # 黄色
 
-    return "👀 Check Needed", "default"
+    # Lv.5: Development環境 または Low/Local
+    # ここですべてを拾います
+    if scope == "DEVELOPMENT":
+        return "🛠 Lv.5 Dev Dependency (開発環境)", "#439FE0" # 青
+    
+    return "⚪ Lv.6 Low/Info (低リスク)", "#808080" # グレー
 
 # --- GraphQL Query for SCA ---
 QUERY_SCA = """
@@ -142,7 +134,7 @@ def run():
         print("Error: GITHUB_TOKEN is not set.")
         return
 
-    print(f"Starting security digest for {REPO_OWNER}/{REPO_NAME}...")
+    print(f"Starting security digest for {REPO_OWNER}/{REPO_NAME} (All Levels)...")
     notifications = []
     
     headers = {
@@ -176,71 +168,53 @@ def run():
 
             vuln = alert["securityVulnerability"]
             pkg_name = vuln["package"]["name"]
-            severity = vuln["severity"]
+            severity = vuln["severity"] # CRITICAL, HIGH, MEDIUM, LOW
             
             raw_scope = alert.get("dependencyScope", "UNKNOWN")
-            scope_display = "🚀 Runtime (本番)" if raw_scope == "RUNTIME" else "🛠 Dev (開発)"
+            scope_display = "🚀 Runtime" if raw_scope == "RUNTIME" else "🛠 Dev"
             
             patched_ver = vuln.get("firstPatchedVersion")
             has_fix = True if patched_ver else False
-            fix_display = f"✅ Fix: `{patched_ver['identifier']}`" if has_fix else "🚫 No Fix (パッチなし)"
+            fix_display = f"✅ Fix: `{patched_ver['identifier']}`" if has_fix else "🚫 No Fix"
 
             advisory = vuln["advisory"]
             cvss_score = advisory["cvss"]["score"] if advisory["cvss"] else 0
             vector_string = advisory["cvss"]["vectorString"] if advisory["cvss"] else ""
             
-            if "AV:N" in (vector_string or ""):
-                path_display = "🌐 Network (外部から攻撃可)"
-            else:
-                path_display = "🔒 Local (内部のみ/安全)"
-
             identifiers = advisory.get("identifiers", [])
             cve_id = next((i["value"] for i in identifiers if i["type"] == "CVE"), "")
             
             epss = get_epss_score(cve_id) if cve_id else 0
             is_in_kev = cve_id in kev_cves
 
+            # 判定ロジック呼び出し
             priority_label, color_style = calculate_sca_priority(
                 is_in_kev, raw_scope, vector_string, severity, epss, has_fix
             )
 
-            # SCA通知対象フィルタ: Lv.1 or Lv.2 or (Lv.3の一部)
-            if (priority_label.startswith("🚨") or 
-                priority_label.startswith("🔥") or 
-                priority_label.startswith("⚠️") or
-                severity in ["CRITICAL", "HIGH"]):
-                
-                if is_in_kev:
-                    kev_display = "💀 Yes (悪用確認済)"
-                else:
-                    kev_display = "🛡️ No (未掲載)"
-                
-                kev_header_info = " | 💀 CISA KEV" if is_in_kev else ""
-
-                msg_text = f"""{priority_label}
+            # 【変更点2】フィルタリング条件を撤廃（無条件に追加）
+            # 以前の if 文を削除し、全て追加します
+            
+            kev_header_info = " | 💀 CISA KEV" if is_in_kev else ""
+            
+            msg_text = f"""{priority_label}
 📦 {pkg_name} ({severity}){kev_header_info}
 ────────────────
-• CISA KEV: {kev_display}
 • Scope: {scope_display}
-• Path: {path_display}
 • Status: {fix_display}
-
-📊 Scores:
-• EPSS: {epss:.2%}
-• CVSS: {cvss_score}
+📊 EPSS: {epss:.2%} / CVSS: {cvss_score}
 🔗 {cve_id}"""
 
-                msg = {
-                    "color": color_style,
-                    "text": msg_text
-                }
-                notifications.append(msg)
+            msg = {
+                "color": color_style,
+                "text": msg_text
+            }
+            notifications.append(msg)
 
     # ==========================================
     # 2. SAST (Code Scanning) Processing
     # ==========================================
     print("Fetching SAST (Code Scanning) alerts...")
-    # Code Scanning API (Open状態のみ取得)
     sast_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/code-scanning/alerts"
     sast_params = {"state": "open"}
     
@@ -250,18 +224,29 @@ def run():
         print(f"  Found {len(sast_alerts)} SAST entries.")
         for alert in sast_alerts:
             rule = alert.get("rule", {})
-            severity = rule.get("security_severity_level", "low").upper() # critical, high, medium, low
+            severity = rule.get("security_severity_level", "low").upper()
             
-            # 【ルール】Critical, High のみ即時通知
-            if severity not in ["CRITICAL", "HIGH"]:
+            # 【変更点3】Low/Mediumも許可するように変更
+            if severity not in ["CRITICAL", "HIGH", "MEDIUM", "LOW"]:
                 continue
                 
             tool_name = alert.get("tool", {}).get("name", "Unknown Tool")
             desc = rule.get("description", "No description")
             html_url = alert.get("html_url", "")
             
-            priority_label = "🚨 SAST Critical (即時対応)" if severity == "CRITICAL" else "🔥 SAST High (要対応)"
-            color_style = "danger"
+            # 重要度に応じたラベル分け
+            if severity == "CRITICAL":
+                priority_label = "🚨 SAST Critical"
+                color_style = "danger"
+            elif severity == "HIGH":
+                priority_label = "🔥 SAST High"
+                color_style = "danger"
+            elif severity == "MEDIUM":
+                priority_label = "🟠 SAST Medium"
+                color_style = "warning"
+            else:
+                priority_label = "⚪ SAST Low"
+                color_style = "#808080" # Grey
             
             msg_text = f"""{priority_label}
 🛡️ Rule: {desc}
@@ -280,7 +265,6 @@ def run():
     # 3. Secret Scanning Processing
     # ==========================================
     print("Fetching Secret Scanning alerts...")
-    # Secret Scanning API (Open状態のみ取得)
     secret_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/secret-scanning/alerts"
     secret_params = {"state": "open"}
     
@@ -289,13 +273,13 @@ def run():
     if secret_alerts and isinstance(secret_alerts, list):
         print(f"  Found {len(secret_alerts)} Secret entries.")
         for alert in secret_alerts:
-            # 【ルール】検知されたら全て通知 (Secretは全てCritical扱い)
+            # Secretは全て通知（変更なし）
             secret_type = alert.get("secret_type_display_name") or alert.get("secret_type")
             html_url = alert.get("html_url", "")
             created_at = alert.get("created_at", "")
             
             priority_label = "🚨 SECRET DETECTED (緊急)"
-            color_style = "#FF0000" # 真っ赤
+            color_style = "#FF0000"
             
             msg_text = f"""{priority_label}
 🔑 Type: {secret_type}
@@ -329,7 +313,7 @@ def run():
                         "type": "header", 
                         "text": {
                             "type": "plain_text", 
-                            "text": f"🛡️ Security Triage Digest ({i+1}-{i+len(batch)}/{total_count})"
+                            "text": f"🛡️ Security Digest (All Levels) ({i+1}-{i+len(batch)}/{total_count})"
                         }
                     },
                     {"type": "divider"}
