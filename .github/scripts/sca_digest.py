@@ -74,7 +74,6 @@ def get_epss_score(cve_id):
     return 0.0
 
 # --- 優先度レベル判定ロジック ---
-# 戻り値をタプル (label_text, color, level_id) に変更して判定しやすくしました
 def calculate_priority(is_kev, scope, vector_string, severity, epss, has_fix):
     is_network = "AV:N" in (vector_string or "")
     is_runtime = (scope == "RUNTIME")
@@ -103,6 +102,7 @@ def calculate_priority(is_kev, scope, vector_string, severity, epss, has_fix):
     return "⚪ Lv.6 Low/Info (低リスク)", "#808080", 6
 
 # --- GraphQL Query (ページネーション対応) ---
+# 変更点: nodes に 'number' を追加してアラートIDを取得できるように修正
 QUERY_SCA = """
 query($owner: String!, $name: String!, $after: String) {
   repository(owner: $owner, name: $name) {
@@ -112,6 +112,7 @@ query($owner: String!, $name: String!, $after: String) {
         endCursor
       }
       nodes {
+        number
         createdAt
         state
         dependencyScope
@@ -132,12 +133,12 @@ query($owner: String!, $name: String!, $after: String) {
 
 def get_all_sca_alerts(headers):
     all_alerts = []
-    has_next_page = True
+    hasNextPage = True
     end_cursor = None
     
     print("Fetching SCA (Dependabot) alerts...")
 
-    while has_next_page:
+    while hasNextPage:
         variables = {"owner": REPO_OWNER, "name": REPO_NAME, "after": end_cursor}
         
         data = http_request(
@@ -156,12 +157,12 @@ def get_all_sca_alerts(headers):
         all_alerts.extend(nodes)
         
         page_info = alerts_data.get("pageInfo", {})
-        has_next_page = page_info.get("hasNextPage", False)
+        hasNextPage = page_info.get("hasNextPage", False)
         end_cursor = page_info.get("endCursor")
         
         print(f"  Fetched {len(nodes)} alerts... (Total: {len(all_alerts)})")
         
-        if has_next_page:
+        if hasNextPage:
             time.sleep(0.5) # レート制限対策
 
     return all_alerts
@@ -198,6 +199,10 @@ def run():
             pkg_name = vuln["package"]["name"]
             severity = vuln["severity"]
             
+            # アラート番号とURLの生成 (追加)
+            alert_number = alert.get("number")
+            alert_url = f"https://github.com/{REPO_OWNER}/{REPO_NAME}/security/dependabot/{alert_number}"
+
             raw_scope = alert.get("dependencyScope", "UNKNOWN")
             scope_display = "🚀 Runtime (本番)" if raw_scope == "RUNTIME" else "🛠 Dev (開発)"
             
@@ -215,7 +220,7 @@ def run():
             epss = get_epss_score(cve_id) if cve_id else 0
             is_in_kev = cve_id in kev_cves
 
-            # 判定ロジックの呼び出し (level_idを受け取るように変更)
+            # 判定ロジックの呼び出し
             priority_label, color_style, level_id = calculate_priority(
                 is_in_kev, raw_scope, vector_string, severity, epss, has_fix
             )
@@ -232,6 +237,7 @@ def run():
             # CISA KEV掲載有無の表示 ---
             kev_display = "💀 YES (Listed)" if is_in_kev else "🛡️ NO"
 
+            # メッセージ作成 (GitHubリンクを追加)
             msg_text = f"""{priority_label}
 📦 {pkg_name} ({severity})
 ────────────────
@@ -240,7 +246,8 @@ def run():
 • CISA KEV: {kev_display}
 • Status: {fix_display}
 📊 EPSS: {epss:.2%} / CVSS: {cvss_score}
-🔗 {cve_id}"""
+🔗 {cve_id}
+👉 <{alert_url}|View Alert #{alert_number} on GitHub>"""
 
             msg = {
                 "color": color_style,
