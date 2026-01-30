@@ -1,0 +1,59 @@
+name: Security Daily Digest
+
+on:
+  schedule:
+    # 日本時間 朝10時 (UTC 1:00) に実行
+    - cron: '0 1 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # GitHub Appを使ってトークンを取得
+      - name: Generate GitHub App Token
+        id: generate_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      # Python 3.14 のセットアップ
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14' 
+
+      # --- ここから修正: 3つのスクリプトを個別に実行 ---
+
+      # 1. SCA (Dependabot)
+      - name: Run SCA Digest (Dependabot)
+        run: python .github/scripts/sca_digest_summary.py
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
+
+      # 2. SAST (CodeQL)
+      # if: always() をつけることで、前のSCAステップが失敗しても実行されます
+      - name: Run SAST Digest (CodeQL)
+        if: always()
+        run: python .github/scripts/sast_digest_summary.py
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
+
+      # 3. Secret Scanning
+      # if: always() をつけることで、前のステップが失敗しても実行されます
+      - name: Run Secret Scan Digest
+        if: always()
+        run: python .github/scripts/secret_digest_summary.py
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
