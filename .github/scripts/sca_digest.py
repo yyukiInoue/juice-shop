@@ -74,24 +74,20 @@ def get_epss_score(cve_id):
     return 0.0
 
 # --- 優先度レベル判定ロジック ---
+# 戻り値をタプル (label_text, color, level_id) に変更して判定しやすくしました
 def calculate_priority(is_kev, scope, vector_string, severity, epss, has_fix):
     is_network = "AV:N" in (vector_string or "")
     is_runtime = (scope == "RUNTIME")
 
+    # Lv.1: CISA KEV掲載 (最優先)
     if is_kev:
-        return "🚨 Lv.1 Emergency (即時)", "danger"
+        return "🚨 Lv.1 Emergency (即時)", "danger", 1
+
+    # Lv.2: Runtime × Network × (EPSS高 or Critical)
     if is_runtime and is_network and (epss >= EPSS_THRESHOLD):
-        return "🔥 Lv.2 Danger (即時)", "danger"
-    if is_runtime and is_network and severity in ["CRITICAL", "HIGH"]:
-        return "⚠️ Lv.3 Warning (月次)", "warning"
-    if is_runtime and severity == "MEDIUM":
-        return "🟠 Lv.4 Medium (中程度)", "warning"
-    if scope == "DEVELOPMENT":
-        return "🛠 Lv.5 Dev Dependency (開発環境)", "#439FE0"
-    return "⚪ Lv.6 Low/Info (低リスク)", "#808080"
+        return "🔥 Lv.2 Danger (即時)", "danger", 2
 
 # --- GraphQL Query (ページネーション対応) ---
-# $after カーソル変数を追加
 QUERY_SCA = """
 query($owner: String!, $name: String!, $after: String) {
   repository(owner: $owner, name: $name) {
@@ -204,15 +200,19 @@ def run():
             epss = get_epss_score(cve_id) if cve_id else 0
             is_in_kev = cve_id in kev_cves
 
-            priority_label, color_style = calculate_priority(
+            # 判定ロジックの呼び出し (level_idを受け取るように変更)
+            priority_label, color_style, level_id = calculate_priority(
                 is_in_kev, raw_scope, vector_string, severity, epss, has_fix
             )
             
+            # --- フィルタリング処理 ---
+            # Lv.1 (Emergency) か Lv.2 (Danger) の場合のみ通知リストに追加
+            if level_id > 2:
+                continue
+            
             if is_in_kev:
-                kev_display = "💀 Yes (悪用確認済)"
                 kev_header_info = " | 💀 CISA KEV"
             else:
-                kev_display = "🛡️ No (未掲載)"
                 kev_header_info = ""
 
             msg_text = f"""{priority_label}
@@ -236,9 +236,8 @@ def run():
     # ==========================================
     if notifications:
         total_count = len(notifications)
-        print(f"Sending {total_count} alerts to Slack...")
+        print(f"Sending {total_count} HIGH-PRIORITY alerts to Slack...")
         
-        # Slack Block Kit制限(50 blocks)回避のため20件に設定
         BATCH_SIZE = 20
         
         if SLACK_WEBHOOK_URL:
@@ -252,7 +251,7 @@ def run():
                         "type": "header", 
                         "text": {
                             "type": "plain_text", 
-                            "text": f"🛡️ Security Digest ({current_start}-{current_end}/{total_count})"
+                            "text": f"🛡️ Security Digest [Lv.1 & Lv.2 Only] ({current_start}-{current_end}/{total_count})"
                         }
                     },
                     {"type": "divider"}
@@ -278,7 +277,7 @@ def run():
         else:
             print("Skipped Slack notification (URL not set).")
     else:
-        print("Clean (No alerts found).")
+        print("Clean (No Lv.1 or Lv.2 alerts found).")
 
 if __name__ == "__main__":
     run()
