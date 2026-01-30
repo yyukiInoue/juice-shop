@@ -80,8 +80,8 @@ def get_epss_score(cve_id):
             pass
     return 0.0
 
-# --- 【修正】優先度レベル判定ロジック（全レベル対応版） ---
-def calculate_priority(is_kev, scope, vector_string, severity, epss, has_fix):
+# --- SCA優先度レベル判定ロジック（全レベル対応版） ---
+def calculate_sca_priority(is_kev, scope, vector_string, severity, epss, has_fix):
     is_network = "AV:N" in (vector_string or "")
     is_runtime = (scope == "RUNTIME")
 
@@ -97,8 +97,6 @@ def calculate_priority(is_kev, scope, vector_string, severity, epss, has_fix):
     if is_runtime and is_network and severity in ["CRITICAL", "HIGH"]:
         return "⚠️ Lv.3 Warning (月次)", "warning"
 
-    # --- 以下を追加: Medium/Low/Dev を明確にラベル付け ---
-
     # Lv.4: Medium Severity (Runtime)
     if is_runtime and severity == "MEDIUM":
         return "🟠 Lv.4 Medium (中程度)", "warning" # 黄色
@@ -110,7 +108,7 @@ def calculate_priority(is_kev, scope, vector_string, severity, epss, has_fix):
     # Lv.6: その他 (Lowなど)
     return "⚪ Lv.6 Low/Info (低リスク)", "#808080" # グレー
 
-# --- GraphQL Query ---
+# --- GraphQL Query for SCA ---
 QUERY_SCA = """
 query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
@@ -192,15 +190,10 @@ def run():
             epss = get_epss_score(cve_id) if cve_id else 0
             is_in_kev = cve_id in kev_cves
 
-            priority_label, color_style = calculate_priority(
+            priority_label, color_style = calculate_sca_priority(
                 is_in_kev, raw_scope, vector_string, severity, epss, has_fix
             )
 
-            # ---------------------------------------------------------
-            # 【修正】以前の if (...) でのフィルタリングを削除しました。
-            # 無条件ですべて通知リストに追加します。
-            # ---------------------------------------------------------
-            
             if is_in_kev:
                 kev_display = "💀 Yes (悪用確認済)"
             else:
@@ -222,11 +215,89 @@ def run():
             }
             notifications.append(msg)
     else:
-        # データが取れなかった場合のデバッグ用
         print("  No SCA data found. (Check permissions if count is 0 unexpectedly)")
 
     # ==========================================
-    # 2. Slack通知 (分割送信対応)
+    # 2. SAST (Code Scanning) Processing
+    # ==========================================
+    # ★ここが復活しました
+    print("Fetching SAST (Code Scanning) alerts...")
+    sast_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/code-scanning/alerts"
+    sast_params = {"state": "open"}
+    
+    sast_alerts = http_request(sast_url, headers=headers, params=sast_params)
+    
+    if sast_alerts and isinstance(sast_alerts, list):
+        print(f"  Found {len(sast_alerts)} SAST entries.")
+        for alert in sast_alerts:
+            rule = alert.get("rule", {})
+            severity = rule.get("security_severity_level", "low").upper()
+            
+            tool_name = alert.get("tool", {}).get("name", "Unknown Tool")
+            desc = rule.get("description", "No description")
+            html_url = alert.get("html_url", "")
+            
+            # 重要度に応じたラベル分け（Medium/Lowも含む）
+            if severity == "CRITICAL":
+                priority_label = "🚨 SAST Critical"
+                color_style = "danger"
+            elif severity == "HIGH":
+                priority_label = "🔥 SAST High"
+                color_style = "danger"
+            elif severity == "MEDIUM":
+                priority_label = "🟠 SAST Medium"
+                color_style = "warning"
+            else:
+                priority_label = "⚪ SAST Low"
+                color_style = "#808080" # Grey
+            
+            msg_text = f"""{priority_label}
+🛡️ Rule: {desc}
+────────────────
+• Tool: {tool_name}
+• Severity: {severity}
+• Link: <{html_url}|View Alert>
+"""
+            msg = {
+                "color": color_style,
+                "text": msg_text
+            }
+            notifications.append(msg)
+
+    # ==========================================
+    # 3. Secret Scanning Processing
+    # ==========================================
+    # ★ここも復活しました
+    print("Fetching Secret Scanning alerts...")
+    secret_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/secret-scanning/alerts"
+    secret_params = {"state": "open"}
+    
+    secret_alerts = http_request(secret_url, headers=headers, params=secret_params)
+    
+    if secret_alerts and isinstance(secret_alerts, list):
+        print(f"  Found {len(secret_alerts)} Secret entries.")
+        for alert in secret_alerts:
+            secret_type = alert.get("secret_type_display_name") or alert.get("secret_type")
+            html_url = alert.get("html_url", "")
+            created_at = alert.get("created_at", "")
+            
+            priority_label = "🚨 SECRET DETECTED (緊急)"
+            color_style = "#FF0000"
+            
+            msg_text = f"""{priority_label}
+🔑 Type: {secret_type}
+────────────────
+• Date: {created_at}
+• Link: <{html_url}|Revoke Immediately>
+"""
+            msg = {
+                "color": color_style,
+                "text": msg_text
+            }
+            notifications.append(msg)
+
+    # ==========================================
+    # 4. Slack通知 (分割送信対応)
     # ==========================================
     if notifications:
         total_count = len(notifications)
