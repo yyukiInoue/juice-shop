@@ -31,12 +31,29 @@ jobs:
         with:
           python-version: '3.14' 
 
-      # 標準ライブラリ(urllib)のみで動作するスクリプトを実行
-      - name: Run Security Digest Script
+      # --- ここから修正: 3つのスクリプトを個別に実行 ---
+
+      # 1. SCA (Dependabot)
+      - name: Run SCA Digest (Dependabot)
+        run: python .github/scripts/sca_digest.py
         env:
-          # リポジトリのSecretsに登録したSlack URL
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          # Stepで生成したApp Tokenを環境変数に渡す
           GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
-        run: |
-          python .github/scripts/security_digest.py
+
+      # 2. SAST (CodeQL)
+      # if: always() をつけることで、前のSCAステップが失敗しても実行されます
+      - name: Run SAST Digest (CodeQL)
+        if: always()
+        run: python .github/scripts/sast_digest.py
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
+
+      # 3. Secret Scanning
+      # if: always() をつけることで、前のステップが失敗しても実行されます
+      - name: Run Secret Scan Digest
+        if: always()
+        run: python .github/scripts/secret_digest.py
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
