@@ -87,6 +87,21 @@ def calculate_priority(is_kev, scope, vector_string, severity, epss, has_fix):
     if is_runtime and is_network and (epss >= EPSS_THRESHOLD):
         return "🔥 Lv.2 Danger (即時)", "danger", 2
 
+    # Lv.3: Runtime × Network × (Critical OR High)
+    if is_runtime and is_network and severity in ["CRITICAL", "HIGH"]:
+        return "⚠️ Lv.3 Warning (月次)", "warning", 3
+
+    # Lv.4: Medium Severity (Runtime)
+    if is_runtime and severity == "MEDIUM":
+        return "🟠 Lv.4 Medium (中程度)", "warning", 4
+
+    # Lv.5: Development環境 または Low/Local
+    if scope == "DEVELOPMENT":
+        return "🛠 Lv.5 Dev Dependency (開発環境)", "#439FE0", 5
+    
+    # Lv.6: その他
+    return "⚪ Lv.6 Low/Info (低リスク)", "#808080", 6
+
 # --- GraphQL Query (ページネーション対応) ---
 QUERY_SCA = """
 query($owner: String!, $name: String!, $after: String) {
