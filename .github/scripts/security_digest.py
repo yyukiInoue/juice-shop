@@ -57,6 +57,7 @@ def get_all_sast_critical_alerts(headers):
     print(f"Fetching ALL SAST (CodeQL) Critical alerts for {REPO_OWNER}/{REPO_NAME}...")
     
     while True:
+        # API側で厳密に Critical のみを要求しています
         params = {
             "state": "open",
             "severity": "critical",
@@ -72,12 +73,11 @@ def get_all_sast_critical_alerts(headers):
             
         all_alerts.extend(data)
         
-        # 取得数がper_page未満なら、それが最後のページ
         if len(data) < per_page:
             break
             
         page += 1
-        time.sleep(0.5) # APIレート制限への配慮
+        time.sleep(0.5)
         
     return all_alerts
 
@@ -94,37 +94,37 @@ def run():
 
     notifications = []
     
-    # ページネーションを使って全件取得
+    # 全件取得
     alerts = get_all_sast_critical_alerts(headers)
 
     if alerts:
         print(f"  Total Found: {len(alerts)} SAST Critical entries.")
         
         for alert in alerts:
-            # 念のためSeverityチェック
-            rule_severity = alert.get("rule", {}).get("severity", "unknown")
-            if rule_severity != "critical":
-                continue
+            # 【修正】以前ここで rule_severity != "critical" を弾いていましたが削除しました。
+            # APIが返してきた時点でCriticalレベル（Security Severity High/Critical）であると信頼します。
 
             rule_desc = alert.get("rule", {}).get("description", "No description")
             rule_id = alert.get("rule", {}).get("id", "unknown-rule")
             tool_name = alert.get("tool", {}).get("name", "CodeQL")
             
-            # リンクの取得 (ここを追加！)
+            # 深刻度の表示用ラベル取得
+            # rule.security_severity_level があればそれを使い、なければ rule.severity を使う
+            rule_info = alert.get("rule", {})
+            severity_label = rule_info.get("security_severity_level", rule_info.get("severity", "CRITICAL"))
+            
             html_url = alert.get("html_url", "#")
             
-            # 発生箇所の特定
             location = alert.get("most_recent_instance", {}).get("location", {})
             file_path = location.get("path", "Unknown file")
             start_line = location.get("start_line", "?")
             
-            # メッセージ作成
             msg_text = f"""🚨 *SAST Critical Alert Found!*
 *Tool:* {tool_name}
 *Rule:* {rule_desc} (`{rule_id}`)
 ────────────────
 • *File:* `{file_path}` (Line: {start_line})
-• *Severity:* `{rule_severity.upper()}`
+• *Severity:* `{str(severity_label).upper()}`
 🔗 <{html_url}|Check Alert on GitHub>"""
 
             msg = {
@@ -139,8 +139,6 @@ def run():
         total_count = len(notifications)
         print(f"Sending {total_count} SAST alerts to Slack...")
         
-        # Slack Block Kitの制限(50 blocks)を考慮し、1通あたり20件に設定
-        # (Header 2 blocks + 20 * (Section 1 + Divider 1) = 42 blocks)
         BATCH_SIZE = 20
         
         if SLACK_WEBHOOK_URL:
@@ -174,7 +172,7 @@ def run():
                 
                 http_request(SLACK_WEBHOOK_URL, method="POST", data=payload)
                 print(f"  Sent batch {current_start}-{current_end}")
-                time.sleep(1) # API制限回避のためのWait
+                time.sleep(1)
                 
             print("Done.")
         else:
