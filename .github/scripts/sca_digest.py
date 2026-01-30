@@ -270,7 +270,7 @@ def run():
                         "type": "header", 
                         "text": {
                             "type": "plain_text", 
-                            "text": f"🛡️ Security Digest [Lv.1 & Lv.2 Only] ({current_start}-{current_end}/{total_count})"
+                            "text": f"🛡️ Security Alert Digest [Daily] ({current_start}-{current_end}/{total_count})"
                         }
                     },
                     {"type": "divider"}
