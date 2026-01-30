@@ -225,11 +225,11 @@ def run():
             if level_id > 2:
                 continue
             
-            # --- 追加箇所: Network Attack有無の判定と表示 ---
+            # Network Attack有無の判定と表示 ---
             is_network = "AV:N" in (vector_string or "")
             network_display = "🌐 YES (Network)" if is_network else "🔒 NO (Local/Phys)"
             
-            # --- 追加箇所: CISA KEV掲載有無の表示 ---
+            # CISA KEV掲載有無の表示 ---
             kev_display = "💀 YES (Listed)" if is_in_kev else "🛡️ NO"
 
             msg_text = f"""{priority_label}
