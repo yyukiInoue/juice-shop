@@ -246,8 +246,8 @@ def run():
 • CISA KEV: {kev_display}
 • Status: {fix_display}
 📊 EPSS: {epss:.2%} / CVSS: {cvss_score}
-🔗 {cve_id}
-👉 <{alert_url}|View Alert #{alert_number} on GitHub>"""
+ {cve_id}
+🔗<{alert_url}|View Alert #{alert_number} on GitHub>"""
 
             msg = {
                 "color": color_style,
