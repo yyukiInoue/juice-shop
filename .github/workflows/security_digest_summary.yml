@@ -1,4 +1,4 @@
-name: Security Daily Digest
+name: Security Daily Digest Summary
 
 on:
   schedule:
@@ -57,3 +57,21 @@ jobs:
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
+
+      # --- CSVレポート生成用 ---
+      
+      # 1. SCA (Dependabot) CSV Export
+      - name: Generate SCA CSV Report
+        run: python .github/scripts/sca_csv_export.py
+        env:
+          GITHUB_TOKEN: ${{ steps.generate_token.outputs.token }}
+
+      # 2. Upload CSV Artifact
+      # 生成されたCSVをGitHub Actionsの画面からダウンロードできるようにアップロードする
+      - name: Upload CSV Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report-sca
+          path: sca_report.csv
+          retention-days: 7
