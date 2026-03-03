@@ -1,9 +1,9 @@
 name: Security Daily Digest Summary
 
 on:
-  schedule:
-    # 日本時間 朝10時 (UTC 1:00) に実行
-    - cron: '0 1 * * 1-5'
+  # schedule:
+  #   # 日本時間 朝10時 (UTC 1:00) に実行
+  #   - cron: '0 1 * * 1-5'
   workflow_dispatch:
 
 permissions:
